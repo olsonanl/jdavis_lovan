@@ -4,6 +4,14 @@
       "Alphacoronavirus.dna": {
         "genome_ids": "11137.1277",
         "genome_name": "Human coronavirus 229E"
+      },
+      "Alphacoronavirus.2.dna": {
+        "genome_ids": "11135.223",
+        "genome_name": "Feline infectious peritonitis virus 79-1146"
+      },
+      "Alphacoronavirus.3.dna": {
+        "genome_ids": "28295.15862",
+        "genome_name": "Porcine epidemic diarrhea virus CV777"
       }
     },
     "features": {
@@ -6288,6 +6296,10 @@
       "Orthorubulavirus.dna": {
         "genome_ids": "2560580.67",
         "genome_name": "Mammalian orthorubulavirus 5 W3A"
+      },
+      "Orthorubulavirus.2.dna": {
+        "genome_ids": "1384672.10420",
+        "genome_name": "Mumps virus genotype G MuVs/BritishColumbia.CAN/47.12[G]"
       }
     },
     "features": {
