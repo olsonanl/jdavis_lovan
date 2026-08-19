@@ -121,6 +121,11 @@ Options include:
 		-i input subject contigs in fasta format
 		-t declare a temp file (d = random)
 		-tax declare a taxonomy id (D = 11158 )
+		-vtax declare the annotation taxon, instead of detecting it by BLASTn (see below)
+		-list-vtax print the valid -vtax values and exit
+		-skip-classification with -vtax, only BLASTn that taxon own reference contigs (bulk reruns)
+		-margin minimum winner/runner-up bit score ratio, e.g. -margin 1.3 (off by default; warns
+		   and records, never rejects -- see below)
 		-g Genome name (D = Paramyxoviridae);
 		-k Keep internal stop codons (D = off) if you think that your genome will have stops
 		   within the PSSM, but still want to make a call over that region creating a pseudo gene.
@@ -151,6 +156,143 @@ There is also a set of debugging parameters that I use frequently:
   -ctbl [file name] concatenate table results to a file (for use with many genomes)
 ```
 
+
+## Declaring the taxon yourself with -vtax
+
+By default the taxon is chosen by BLASTn against `Viral-Rep-Contigs/` (see Step 1 below).  If you
+already know what the genome is -- or it is divergent enough that no reference clears `-mcb`, or
+BLASTn keeps landing on the wrong neighbouring genus -- you can declare it:
+
+```
+annotate_by_viral_pssm.pl -i contigs.fasta -p out -vtax Phenuiviridae
+annotate_by_viral_pssm-GTO.pl -i in.gto -o out.gto --viral-taxon Henipavirus
+```
+
+The classification BLASTn still runs, and prints a warning to stderr if it disagrees with you,
+naming both its own pick and the best reference *within* the taxon you declared.  The `-mcb`
+rejection becomes a warning rather than a fatal error, since you have taken that call.  The
+closest-genome columns report the best reference within your declared taxon, so the output table
+and the GTO `close_genomes` record stay internally consistent.
+
+### Speeding up bulk reruns
+
+By default `-vtax` still runs the full classification BLASTn over every reference file, so it can
+tell you when BLASTn disagrees with your declared taxon.  That sweep is flat in genome size and
+linear in the number of references: ~0.15 s per reference, so ~11.5 s at the 78 references in place
+when the table below was measured and ~13 s at the current 87.  For a one-off that does not matter;
+for a
+100k-genome rerun it dominates.
+
+`-skip-classification` restricts the sweep to the reference contigs of the declared taxon only
+(1–14 files, median 1):
+
+```
+annotate_by_viral_pssm.pl -i contigs.fasta -p out -vtax Morbillivirus -skip-classification
+```
+
+Output is byte-identical to the same run without the flag.  What you give up is the cross-check
+warning: nothing will tell you that BLASTn would have picked a different taxon.  Use it only when
+the taxon is already known to be right.
+
+Measured end-to-end, small fragment inputs, at 78 references:
+
+| Declared taxon | PSSMs | Full sweep | Restricted | Speedup |
+|---|---|---|---|---|
+| Morbillivirus | 26 | 15.9 s | 4.5 s | 3.5x |
+| Orthopneumovirus | 66 | 22.2 s | 10.4 s | 2.1x |
+| Alphainfluenzavirus | 125 | 31.3 s | 19.6 s | 1.6x |
+| Betacoronavirus | 410 | 74.5 s | 63.0 s | 1.2x |
+
+The saving is the same ~11.5 s in every case; the ratio varies because the remaining cost is the
+per-PSSM tBLASTn stage, which this flag does not touch and which scales with how many PSSMs the
+declared taxon has (18 to 410, median 26).
+
+### What to type
+
+
+Run `annotate_by_viral_pssm.pl -list-vtax` for the authoritative list.  There are 34 values, and
+they are the same strings used for the `Viral-PSSMs/<name>.pssms/` directories, the top-level keys
+of `Viral_PSSM.json`, and the `Viral-Rep-Contigs/<name>[.N].dna` prefixes.
+
+**They are not all families.**  Each clade is split at whatever rank its PSSMs discriminate:
+
+| Rank | N | Values |
+|---|---|---|
+| Family | 8 | `Arenaviridae`, `Fimoviridae`, `Hantaviridae`, `Nairoviridae`, `Peribunyaviridae`, `Phasmaviridae`, `Phenuiviridae`, `Tospoviridae` -- every Bunyavirales clade |
+| Genus | 25 | `Alpha`/`Beta`/`Delta`/`Gammacoronavirus`; `Alpha`/`Beta`/`Delta`/`Gammainfluenzavirus`, `Isavirus`; `Orthoebolavirus`, `Orthomarburgvirus`; `Aquaparamyxovirus`, `Ferlavirus`, `Henipavirus`, `Jeilongvirus`, `Metaavulavirus`, `Morbillivirus`, `Narmovirus`, `Orthoavulavirus`, `Orthorubulavirus`, `Paraavulavirus`, `Pararubulavirus`, `Respirovirus`; `Metapneumovirus`, `Orthopneumovirus` |
+| Species | 1 | `Orthopneumovirus_muris` |
+
+Things that trip people up:
+
+- There is no `Coronaviridae`, `Paramyxoviridae`, `Filoviridae`, or `Pneumoviridae` entry -- name
+  the genus.  Conversely there is no `Orthohantavirus`; the Bunyavirales resolve only to family, so
+  it is `Hantaviridae`.
+- Names are current ICTV.  Influenza A is `Alphainfluenzavirus` (not `InfluenzaA`, `FluA`, or a
+  subtype like `H1N1`), influenza D is `Deltainfluenzavirus`, and Ebola is `Orthoebolavirus` (the
+  genus was renamed from `Ebolavirus`).
+- `Orthopneumovirus_muris` is the only name with an underscore; it stands in for the space in the
+  binomial *Orthopneumovirus muris*.  Because `Orthopneumovirus` is a strict prefix of it, matching
+  is exact-string only -- a case-only mismatch is accepted with a note, nothing else is.
+- A segmented genome takes one taxon for all its segments; segment identity comes from the
+  per-feature `segments` block in `Viral_PSSM.json`.
+- The value becomes `viral_family` in the GTO, which is what the downstream steps use to pick
+  `Transcript-Editing/<name>/` and `Splice-Variants/<name>/`.  Only 17 of the 34 taxa have a
+  transcript-editing directory and only 5 have a splice-variant one, so declaring the taxon can
+  turn those steps on or off.
+
+## Checking how confident a classification is, with -margin
+
+`-mcb` asks whether the best BLASTn hit is *strong enough*.  It does not ask whether it beat the
+next taxon, and those are different questions: a fragment can score 183 bits -- comfortably over
+the default cutoff of 150 -- while the runner-up taxon scores 145.  That is a coin-flip being
+recorded as an annotation.
+
+`-margin` scores the second question.  It takes the ratio of the winning taxon's bit score to the
+runner-up's and warns when the ratio is below the value you give:
+
+```
+annotate_by_viral_pssm.pl -i contigs.fasta -p out -margin 1.3
+annotate_by_viral_pssm-GTO.pl -i in.gto -o out.gto --margin 1.3
+```
+
+```
+WARNING: low classification margin 1.19 (< -margin 1.3): Jeilongvirus scored 217.285 but
+Morbillivirus scored 183.165. The winning taxon is only 19% ahead of the runner-up; treat this
+call as unconfirmed.
+```
+
+Notes on the behaviour:
+
+- **It is off by default.**  Without the flag nothing is computed, warned about, or written, and a
+  run is bit-for-bit what it was before the option existed.
+- **It never rejects.**  The genome is annotated either way; this marks the call, it does not gate
+  it.  There is no default threshold, because the only value we have evidence for was fitted to a
+  single case that has since been fixed by adding a reference.
+- **It costs nothing.**  The per-taxon best score is already known from the classification sweep.
+- **It is refused with `-skip-classification`**, which searches one taxon's references and so has
+  no runner-up to compare against, and with any value `<= 1`, which would accept anything.
+
+Whether or not it warns, `-margin` writes a `<prefix>.classification` sidecar next to the other
+outputs -- tab-separated `key<TAB>value` lines, then the full per-taxon ranking:
+
+```
+taxon           Jeilongvirus
+reference       Jeilongvirus.2.dna
+bit             217.285
+runner_up       Morbillivirus
+runner_up_bit   183.165
+margin          1.19
+margin_threshold 1.3
+below_threshold 1
+annotated_as    Jeilongvirus
+score   Jeilongvirus    217.285 Jeilongvirus.2.dna
+score   Morbillivirus   183.165 Morbillivirus.2.dna
+...
+```
+
+`margin` is the literal string `inf` when no other taxon scored above zero.  The GTO wrapper reads
+the sidecar and adds `margin`, `runner_up`, `runner_up_value` and `margin_below_threshold` to the
+`close_genomes` record, so the confidence of the call travels with the genome.
 
 ## Step 1.  Calling features based on PSSMs
 
