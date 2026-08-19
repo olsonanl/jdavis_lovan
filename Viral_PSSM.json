@@ -4396,6 +4396,10 @@
    },
    "Jeilongvirus" : {
       "close_genomes" : {
+         "Jeilongvirus.2.dna" : {
+            "genome_ids" : "1497434.118",
+            "genome_name" : "Rodent paramyxovirus RtAp-ParaV/NX2015"
+         },
          "Jeilongvirus.dna" : {
             "genome_ids" : "341053.212",
             "genome_name" : "Beilong virus"
