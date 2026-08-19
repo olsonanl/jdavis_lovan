@@ -9,6 +9,10 @@
             "genome_ids" : "28295.15862",
             "genome_name" : "Porcine epidemic diarrhea virus CV777"
          },
+         "Alphacoronavirus.4.dna" : {
+            "genome_ids" : "277944.2576",
+            "genome_name" : "Human coronavirus NL63 Amsterdam I"
+         },
          "Alphacoronavirus.dna" : {
             "genome_ids" : "11137.1277",
             "genome_name" : "Human coronavirus 229E"
@@ -1085,6 +1089,10 @@
          "Betacoronavirus.2.dna" : {
             "genome_ids" : "NC_006577",
             "genome_name" : "Human coronavirus HKU1"
+         },
+         "Betacoronavirus.3.dna" : {
+            "genome_ids" : "1335626.1148",
+            "genome_name" : "Middle East respiratory syndrome-related coronavirus strain HCoV-EMC"
          }
       },
       "features" : {
@@ -4884,6 +4892,14 @@
    },
    "Morbillivirus" : {
       "close_genomes" : {
+         "Morbillivirus.2.dna" : {
+            "genome_ids" : "11232.2026",
+            "genome_name" : "Canine morbillivirus Onderstpoort"
+         },
+         "Morbillivirus.3.dna" : {
+            "genome_ids" : "2593991.964",
+            "genome_name" : "Peste des petits ruminants virus Turkey 2000"
+         },
          "Morbillivirus.dna" : {
             "genome_ids" : "11234.4208",
             "genome_name" : "Measles morbillivirus Ichinose-B95a"
@@ -7104,6 +7120,10 @@
    },
    "Respirovirus" : {
       "close_genomes" : {
+         "Respirovirus.2.dna" : {
+            "genome_ids" : "11191.93",
+            "genome_name" : "Murine respirovirus Ohita"
+         },
          "Respirovirus.dna" : {
             "genome_ids" : "11216.1426",
             "genome_name" : "Human respirovirus 3"
