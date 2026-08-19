@@ -15,6 +15,18 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
 		-i   Input subject contigs in fasta format
 		-t   Declare a temp file (d = random)
 		-tax Declare a taxonomy id (D = 10239)
+		-vtax Declare the annotation taxon, skipping BLASTn-based detection.
+		     Must be one of the names printed by -list-vtax (a PSSM directory name).
+		     The classification BLASTn still runs and warns if it disagrees, and
+		     the -mcb rejection is downgraded to a warning.
+		     NOTE: this value also becomes viral_family in the GTO, which selects
+		     the Transcript-Editing/ and Splice-Variants/ dirs used downstream.
+		-list-vtax  Print the valid -vtax values to STDOUT and exit.
+		-skip-classification  Only BLASTn the reference contigs belonging to the
+		     declared -vtax taxon (1-14 files) instead of every rep in -c.  Requires -vtax.  Cuts the
+		     dominant cost of a run; the tradeoff is that no cross-check against
+		     the other taxa is possible, so a mistaken -vtax will not be caught.
+		     Intended for bulk reruns where the taxon is already known to be right.
 		-g   Genome name (D = Viruses);
 		-p   Prefix for the output files (.ffn, .faa, and .tbl files)
 		-s   Append sequences to the feature table (default is that they are left off)
@@ -25,6 +37,17 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
 		-max Maximum contig length (d = 35000) # for reference Measles is 15,894 and Beilong is 19,212
 	
 		-mcb Minimum contig bitscore to enable annotation (d = 150) #otherwise the genome is rejected.
+
+		-margin Minimum ratio between the bit score of the winning taxon and that of
+		     the runner-up taxon (e.g. -margin 1.3).  OFF by default: without it
+		     nothing is computed, warned about, or written.  When given, the
+		     classification is scored for confidence as well as absolute strength --
+		     a genome that clears -mcb but beats the runner-up by only a few bits is
+		     a near-tie, and a near-tie in the wrong direction is a mis-annotation
+		     rather than a failed job.  The genome is still annotated: this warns on
+		     STDERR and writes the numbers to <prefix>.classification, it does not
+		     reject.  Not available with -skip-classification, which searches the
+		     reps of one taxon only and so has no runner-up to compare against.
 
         -j   Full path to the options file in JSON format which carries data for a match (D = $default_data_dir/Viral_PSSM.json)
 		-c   Representative contigs directory (D = $default_data_dir/Viral-Rep-Contigs)
@@ -54,8 +77,8 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			8	end	
  			9	strand	
  			10	na_length	
- 			11	annotation taxon
- 			12	closest genome
+ 			11	annotation taxon (BLASTn-detected, or declared with -vtax)
+ 			12	closest genome (best rep within the annotation taxon)
  			13	closest genome bit score (BLASTn of contigs)
  			14  closest genome id(s)
  			15  closest genome name
@@ -64,7 +87,7 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			18	AA sequence (if -s append sequences)
 ';
 
-my ($help, $opt_file, $contig_file, $tmp, $tax, $keep_stop, $genome_name, $cdir, $pdir, $keep_temp, $min_len, $max_len, $aa_only, $dna_only, $tbl_only, $no_out, $ctbl, $prefix, $append_seqs, $threads, $min_contig_bit);
+my ($help, $opt_file, $contig_file, $tmp, $tax, $vtax, $list_vtax, $skip_class, $keep_stop, $genome_name, $cdir, $pdir, $keep_temp, $min_len, $max_len, $aa_only, $dna_only, $tbl_only, $no_out, $ctbl, $prefix, $append_seqs, $threads, $min_contig_bit, $min_margin);
 
 my $opts = GetOptions( 'h'         => \$help,
                        'tmp'       => \$keep_temp,
@@ -75,6 +98,9 @@ my $opts = GetOptions( 'h'         => \$help,
                        'ctbl=s'    => \$ctbl,
                        'i=s'       => \$contig_file,
                        'tax=s'     => \$tax,
+                       'vtax=s'    => \$vtax,
+                       'list-vtax' => \$list_vtax,
+                       'skip-classification' => \$skip_class,
                        'threads=s' => \$threads,
                        't=s'       => \$tmp,
                        'g=s'       => \$genome_name,
@@ -83,13 +109,14 @@ my $opts = GetOptions( 'h'         => \$help,
                        'min=s'     => \$min_len,
                        'max=s'     => \$max_len,
                        'mcb=f'     => \$min_contig_bit,
+                       'margin=f'  => \$min_margin,
                        'j=s'       => \$opt_file,
                        'ks'        => \$keep_stop,
                        'p=s'       => \$prefix,
                        's'         => \$append_seqs); 
 
 if ($help){die "$usage\n";}
-unless ($contig_file ){die "must declare an input subject file with -i \n\n$usage\n";}
+unless ($contig_file || $list_vtax){die "must declare an input subject file with -i \n\n$usage\n";}
 
 # Name the Temp file:
 # generates a random 20 digit string of 0-9a-f
@@ -111,6 +138,63 @@ unless ($threads){$threads = 8}
 open (IN, "<$opt_file"), or die "Cant find JSON options file, use -opt\n"; 
 my $options = decode_json(scalar read_file(\*IN));
 close IN;
+
+## Resolve the annotation taxon.  By default it is detected by BLASTn against
+## Viral-Rep-Contigs (below); -vtax lets the user declare it instead.
+## Do this before makeblastdb / the temp dir / the output filehandles so that a
+## bad name fails without leaving anything behind on disk.
+
+my @valid_vtax = valid_vtax_list($pdir, $options);
+
+if ($list_vtax)
+{
+	print "$_\n" foreach @valid_vtax;
+	exit(0);
+}
+
+if ($skip_class && (! defined $vtax))
+{
+	die "-skip-classification only makes sense with -vtax: there is no declared taxon to restrict the sweep to.\n";
+}
+
+# The margin is winner/runner-up across taxa, so it needs the full sweep.  Under
+# -skip-classification only one taxon's reps are searched and there is no runner-up
+# to divide by; fail loudly rather than silently reporting an infinite margin.
+if (defined $min_margin)
+{
+	die "-margin needs a ratio greater than 1 (got $min_margin); 1 would accept any winner.\n"
+		if $min_margin <= 1;
+	die "-margin cannot be combined with -skip-classification: only the declared taxon's\n"
+	  . "reference contigs are searched, so there is no runner-up taxon to compare against.\n"
+		if $skip_class;
+}
+
+if (defined $vtax)
+{
+	$vtax =~ s/^\s+|\s+$//g;
+	$vtax =~ s/\.pssms$//;   # tolerate a pasted PSSM directory name
+
+	my %exact = map {($_ => 1)} @valid_vtax;
+	my %fold  = map {(lc($_) => $_)} @valid_vtax;
+
+	# Exact match first.  This is what keeps -vtax Orthopneumovirus from ever
+	# resolving to Orthopneumovirus_muris -- never use prefix/substring matching here.
+	unless ($exact{$vtax})
+	{
+		if (exists $fold{lc $vtax})
+		{
+			print STDERR "Interpreting -vtax '$vtax' as '$fold{lc $vtax}'\n";
+			$vtax = $fold{lc $vtax};
+		}
+		else
+		{
+			die "Unknown -vtax value '$vtax'.\n"
+			  . "Valid annotation taxa (PSSM dirs in $pdir that also have a $opt_file entry):\n"
+			  . join("", map {"\t$_\n"} @valid_vtax)
+			  . "Use -list-vtax to print this list.\n";
+		}
+	}
+}
 
 
 # Version the Genome (another random alpha numeric)
@@ -180,9 +264,26 @@ opendir (DIR, "$cdir");
 my @reps = sort grep{$_ !~ /^\./}readdir(DIR);   # sort: reproducible reference pick on ties (gist #19)
 closedir(DIR);
 
+# -skip-classification: drop every rep that does not belong to the declared taxon.
+# The remaining blastn is no longer a classification -- it exists only to pick the
+# closest reference within $vtax for the close-genome columns.  Same taxon-name
+# derivation as the loop below, so Orthopneumovirus cannot pull in Orthopneumovirus_muris.
+if ($skip_class)
+{
+	my $before = scalar @reps;
+	@reps = grep { my $t = $_; $t =~ s/\..+//g; $t eq $vtax } @reps;
+	unless (@reps)
+	{
+		die "-skip-classification: no reference contigs for -vtax $vtax in $cdir\n";
+	}
+	printf STDERR "Restricting BLASTn sweep to %d of %d reference contigs (-skip-classification, -vtax %s)\n",
+	       scalar @reps, $before, $vtax;
+}
+
 my $best_contig_bit = 0;
 my $best_virus_match;
 my $best_rep;
+my %taxon_best;   # taxon => [best bit, best rep] -- lets -vtax report its own taxon's score
 foreach (@reps)
 {
 	my $rep = $_;
@@ -201,30 +302,151 @@ foreach (@reps)
 		$best_virus_match = $virus;
 		$best_rep = $rep;
 	}
+
+	# Track the best rep per taxon as well, so a declared -vtax can report the
+	# closest reference *within* the taxon it is actually annotating with.
+	# !exists guarantees an entry even when every rep for a taxon scores 0.
+	if ((! exists $taxon_best{$virus}) || ($match_bit >= $taxon_best{$virus}->[0]))
+	{
+		$taxon_best{$virus} = [$match_bit, $rep];
+	}
 }	
 
-# here we make it fail gracefully if we don't enounter a reference genome with a high 
-# enough blastn bit score.
+# The taxon we annotate with: a user-declared -vtax wins over the BLASTn call.
+# This is the only place the annotation taxon is chosen; everything below keys off $virus.
 
-if ($best_contig_bit < $min_contig_bit) {
-    print STDERR "No matching reference contigs with bit score greater than $min_contig_bit\n";
-    exit(1);
+my $virus = defined $vtax ? $vtax : $best_virus_match;
+
+# Columns 12-13 (closest genome / bit score) track the taxon we are actually annotating
+# with, not the overall BLASTn winner.  Reporting an out-of-taxon reference here would
+# put a permanently mislabeled record in the GTO close_genomes list, which carries no
+# taxon field of its own.  The cross-taxon result is preserved in the warning below.
+
+my ($anno_bit, $anno_rep) = defined $vtax
+                          ? @{ $taxon_best{$vtax} || [0, undef] }
+                          : ($best_contig_bit, $best_rep);
+
+# here we make it fail gracefully if we don't enounter a reference genome with a high 
+# enough blastn bit score.  If the user declared the taxon they have taken that call,
+# so warn and continue instead of rejecting the genome.
+
+if ($best_contig_bit < $min_contig_bit)
+{
+	if (defined $vtax)
+	{
+		my $scope = $skip_class ? "best within $vtax" : "best overall";
+		print STDERR "WARNING: no reference contig scored above -mcb $min_contig_bit ($scope = "
+		           . (defined $best_rep ? $best_rep : "none") . ", bit = $best_contig_bit); "
+		           . "continuing because -vtax $vtax was declared.\n";
+	}
+	else
+	{
+		print STDERR "No matching reference contigs with bit score greater than $min_contig_bit\n";
+		exit(1);
+	}
 }
 
+# Not reachable under -skip-classification: only $vtax's own reps were searched, so
+# $best_virus_match is either $vtax or undef.  Guarded explicitly rather than relying on that.
+if ((! $skip_class) && (defined $vtax) && (defined $best_virus_match) && ($best_virus_match ne $vtax))
+{
+	print STDERR "WARNING: -vtax declared $vtax, but BLASTn classification chose $best_virus_match "
+	           . "(rep $best_rep, bit = $best_contig_bit). Best hit within declared $vtax = "
+	           . (defined $anno_rep ? "$anno_rep, bit = $anno_bit" : "none")
+	           . ". Annotating as $vtax.\n";
+}
 
+# Margin scoring (-margin).  Off unless a ratio was given.
+#
+# -mcb asks "is the best hit strong enough"; the margin asks "is it better than the
+# alternative".  Those come apart: a genome can clear 150 comfortably and still be a
+# near-tie between two taxa, and that is the shape of a wrong call.  The reference
+# additions of 2026-08-19 produced exactly one wrong accepted call in a 500-genome
+# validation set, and its margin (1.26) was the smallest of all 363 accepted calls
+# against a median of 15.4 -- unremarkable in bit score, an outlier in margin.
+#
+# %taxon_best already holds the per-taxon best from the sweep, so the runner-up costs
+# no extra BLAST.  This warns and records; it never rejects, because for the failure
+# set a wrong-but-flagged annotation is more useful than another dead job.
 
-#get closest genome data
-my $best_rep_ids   = $options->{$best_virus_match}->{close_genomes}->{$best_rep}->{genome_ids};
-my $best_rep_name  = $options->{$best_virus_match}->{close_genomes}->{$best_rep}->{genome_name};
+my ($margin, $runner_up, $runner_up_bit);
+if (defined $min_margin)
+{
+	# rank taxa by their best bit score; the winner is $best_virus_match by construction
+	my @ranked = sort {$taxon_best{$b}->[0] <=> $taxon_best{$a}->[0]} keys %taxon_best;
+	if (@ranked >= 2)
+	{
+		$runner_up     = $ranked[1];
+		$runner_up_bit = $taxon_best{$runner_up}->[0];
+	}
 
+	# No runner-up, or a runner-up that scored zero, means nothing else was in
+	# contention.  That is maximum confidence, not a division by zero.
+	$margin = (defined $runner_up_bit && $runner_up_bit > 0)
+	        ? $best_contig_bit / $runner_up_bit
+	        : undef;
 
+	my $shown = defined $margin ? sprintf("%.2f", $margin) : "inf";
+	if (defined $margin && $margin < $min_margin)
+	{
+		printf STDERR "WARNING: low classification margin %.2f (< -margin %s): %s scored %s but "
+		            . "%s scored %s. The winning taxon is only %.0f%% ahead of the runner-up; "
+		            . "treat this call as unconfirmed.\n",
+		            $margin, $min_margin, $best_virus_match, $best_contig_bit,
+		            $runner_up, $runner_up_bit, 100 * ($margin - 1);
+	}
+	else
+	{
+		print STDERR "Classification margin $shown"
+		           . (defined $runner_up ? " (runner-up $runner_up, bit = $runner_up_bit)" : " (no runner-up taxon)")
+		           . "\n";
+	}
 
+	# Sidecar, so the numbers survive the run.  Written whenever -margin is given,
+	# not only on a warning -- a margin is evidence either way, and the GTO wrapper
+	# reads this file to attach it to close_genomes.
+	#
+	# $base, not the cwd: we are inside the temp dir at this point (chdir above), and
+	# the wrapper deletes it.  This is where the .tbl/.ffn/.faa outputs land too --
+	# they are written after the chdir back, so an absolute -p must not be re-rooted.
+	my $cls_file = ($prefix =~ m,^/,) ? "$prefix.classification" : "$base/$prefix.classification";
+	if (open(my $cls, ">", $cls_file))
+	{
+		print $cls "taxon\t$best_virus_match\n";
+		print $cls "reference\t" . (defined $best_rep ? $best_rep : "-") . "\n";
+		print $cls "bit\t$best_contig_bit\n";
+		print $cls "runner_up\t" . (defined $runner_up ? $runner_up : "-") . "\n";
+		print $cls "runner_up_bit\t" . (defined $runner_up_bit ? $runner_up_bit : 0) . "\n";
+		print $cls "margin\t$shown\n";
+		print $cls "margin_threshold\t$min_margin\n";
+		print $cls "below_threshold\t" . ((defined $margin && $margin < $min_margin) ? 1 : 0) . "\n";
+		print $cls "annotated_as\t$virus\n";
+		# full ranking, so a near-tie can be inspected without rerunning the sweep
+		for my $t (@ranked)
+		{
+			last if $taxon_best{$t}->[0] <= 0;
+			print $cls "score\t$t\t$taxon_best{$t}->[0]\t$taxon_best{$t}->[1]\n";
+		}
+		close $cls;
+	}
+	else
+	{
+		print STDERR "WARNING: could not write $cls_file: $!\n";
+	}
+}
 
+#get closest genome data, for the taxon we are annotating with
+my ($best_rep_ids, $best_rep_name) = ("", "");
+if (defined $anno_rep)
+{
+	$best_rep_ids  = $options->{$virus}->{close_genomes}->{$anno_rep}->{genome_ids};
+	$best_rep_name = $options->{$virus}->{close_genomes}->{$anno_rep}->{genome_name};
+}
 
-
-
-my $virus = $best_virus_match;	
-print STDERR "-----------------------\nMatching $virus\tBit = $best_contig_bit\n-----------------------\n"; 
+print STDERR "-----------------------\nAnnotating as $virus\tBit = $anno_bit"
+           . (defined $vtax ? ($skip_class ? "\t(taxon declared with -vtax, sweep restricted)"
+                                                   : "\t(taxon declared with -vtax)") : "")
+           . "\n-----------------------\n"; 
 opendir (DIR, "$pdir/$virus.pssms");
 my @pssm_dirs = sort grep{$_ !~ /^\./}readdir(DIR);  # reads the directory of PSSM dirs (sorted: gist #19)
 closedir(DIR);
@@ -488,34 +710,34 @@ foreach (@contig_order)
 		{
 			if ($append_seqs)
 			{
-				print TBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
+				print TBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
 			}
 			else
 			{
-				print TBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
+				print TBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
 			}
 		}
 		if($tbl_only)
 		{
 			if ($append_seqs)
 			{
-				print "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
+				print "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
 			}
 			else
 			{
-				print "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
+				print "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
 			}		
 		}
 		if($ctbl)
 		{
 			if ($append_seqs)
 			{
-				print CTBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
+				print CTBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\t$_->[6]\t$_->[7]\n";
 
 			}
 			else
 			{
-				print CTBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$best_rep\t$best_contig_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
+				print CTBL "$tax\.$version\t$genome_name\t$_->[0]\tLV\t$_->[8]\t$prot_id\t$_->[9]\t$_->[1]\t$_->[2]\t$_->[4]\t$na_len\t$virus\t$anno_rep\t$anno_bit\t$best_rep_ids\t$best_rep_name\t$_->[5]\t$_->[3]\n";
 
 			}
 		}
@@ -948,3 +1170,36 @@ sub get_blastn_bit
 
 
 
+
+
+##########################sub valid_vtax_list##############
+# The canonical list of annotation taxon names accepted by -vtax.
+#
+# Sourced from the intersection of the PSSM directory names and the top-level
+# keys of the JSON options file, because those are the only two things the
+# chosen taxon is ever used to index.  Deriving it from -pssm and -j means a
+# user who overrides either one automatically gets the matching list.
+# Viral-Rep-Contigs is deliberately not consulted: a rep file with no JSON
+# entry cannot be annotated with anyway.
+#
+#   my @names = valid_vtax_list($pssm_dir, $options);
+#
+#----------------------------------------------------------
+sub valid_vtax_list
+{
+	my ($pdir, $options) = @_;
+
+	opendir (my $dh, $pdir) or die "Cannot open PSSM directory $pdir: $!\n";
+	my @dirs = sort grep{/\.pssms$/} readdir($dh);
+	closedir($dh);
+
+	my @names;
+	foreach (@dirs)
+	{
+		my $name = $_;
+		$name =~ s/\.pssms$//;
+		push @names, $name if exists $options->{$name};
+	}
+	return @names;
+}
+###########################################################

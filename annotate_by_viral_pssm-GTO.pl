@@ -33,6 +33,10 @@ my($opt, $usage) = describe_options("%c %o",
 				    ["json|j=s"        => "Full path to the JSON opts file", {default => "$default_data_dir/Viral_PSSM.json"}],
 				    ["max|a=i"         => "Max contig length, default is 40000", { default => 40000 }],
 				    ["min|z=i"         => "Min contig length, default is 300", { default => 300 }],
+				    ["viral-taxon=s"   => "Declare the annotation taxon instead of detecting it by BLASTn. See --list-viral-taxa. Also sets viral_family, which selects the Transcript-Editing/ and Splice-Variants/ dirs used by the downstream steps"],
+				    ["list-viral-taxa" => "List the valid --viral-taxon values and exit"],
+				    ["skip-classification" => "With --viral-taxon, BLASTn only that taxon reference contigs (1-14) instead of every reference contig. Much faster, but no cross-check against the other taxa, so a wrong --viral-taxon will not be caught. For bulk reruns where the taxon is already known to be correct"],
+				    ["margin=f"        => "Minimum ratio between the winning and runner-up taxon bit scores, e.g. --margin 1.3. Off by default. Warns when the classification is a near-tie and records the margin on the GTO close_genomes record; never rejects. Incompatible with --skip-classification, which searches one taxon only"],
 				    ["version|v"       => "Show version information"],
 				    ["help|h"          => "Show this help message"]);
 
@@ -41,6 +45,15 @@ if ($opt->version) {
     exit 0;
 }
 print($usage->text), exit 0 if $opt->help;
+
+# Delegate to the base script rather than reimplementing, so there is one canonical list.
+# Must run before create_from_file() below, which requires -i.
+if ($opt->list_viral_taxa) {
+    my $listed = run(["annotate_by_viral_pssm.pl", "-list-vtax",
+		      "-pssm", $opt->pdir, "-j", $opt->json]);
+    exit($listed ? 0 : 1);
+}
+
 die($usage->text) if @ARGV != 0;
 
 chomp(my $hostname = `hostname`);
@@ -89,6 +102,10 @@ my @params = ("-i",    $sequences_file,
 		      "-tbl",
 		      "-tmp");
 
+push @params, ("-vtax", $opt->viral_taxon) if $opt->viral_taxon;
+push @params, ("-skip-classification")             if $opt->skip_classification;
+push @params, ("-margin", $opt->margin)            if $opt->margin;
+
 print STDERR Dumper(\@params);
 my $ok = run(["annotate_by_viral_pssm.pl", @params], ">", "$here/$prefix.stdout.txt", "2>", "$here/$prefix.stderr.txt");
 
@@ -100,6 +117,8 @@ if (!$ok)
     # NOTE: execution continues below and still writes an output GTO. See caveat in the porting notes --
     # a genuine BLAST crash and the base script's graceful "no reference match" exit(1) are
     # indistinguishable by return code, so we do not hard-abort here.
+    # (Exception: under --viral-taxon the base script warns instead of exiting on a low -mcb,
+    # so a non-zero rc there is unambiguously a real failure.)
 }
 
 
@@ -203,11 +222,29 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 
 	#add close genome:
 	#$close_genome, $close_bit, $close_id, $close_name,
-	my $close = { genome_id => $close_id, genome_name => $close_name, file_name => $close_file, closeness_measure => "BLASTn bit score", closeness_value => $close_bit, analysis_method => "LowVan Annotate"};
-	push(@{$genome_in->{close_genomes}}, $close);
+	# An empty feature table leaves all of these undef -- do not append a record of nulls.
+	# Much more likely now that --viral-taxon can name a taxon whose PSSMs match nothing.
+	if (defined $close_id)
+	{
+		my $close = { genome_id => $close_id, genome_name => $close_name, file_name => $close_file, closeness_measure => "BLASTn bit score", closeness_value => $close_bit, analysis_method => "LowVan Annotate"};
 
+		# --margin: carry the confidence of the classification, not just its strength.
+		# The base script wrote these to $prefix.classification; absent that file the
+		# flag was not used and the record keeps its original shape.
+		if (my $cls = read_classification("$here/$prefix.classification"))
+		{
+			$close->{margin}          = $cls->{margin}        if defined $cls->{margin};
+			$close->{runner_up}       = $cls->{runner_up}     if defined $cls->{runner_up};
+			$close->{runner_up_value} = $cls->{runner_up_bit} if defined $cls->{runner_up_bit};
+			$close->{margin_below_threshold} = $cls->{below_threshold}
+				if defined $cls->{below_threshold};
+		}
+		push(@{$genome_in->{close_genomes}}, $close);
+	}
 
-	$genome_in->{viral_family} = $viral_family;
+	# Fall back to the declared taxon: without this, a --viral-taxon run that calls zero
+	# features leaves viral_family undef and every downstream step dies on its "$fam or die".
+	$genome_in->{viral_family} = defined $viral_family ? $viral_family : $opt->viral_taxon;
 }
 else
 {
@@ -215,6 +252,38 @@ else
 }
 
 $genome_in->destroy_to_file($opt->output);
+
+#
+# Read the <prefix>.classification sidecar written by annotate_by_viral_pssm.pl -margin.
+# Returns undef when the file is absent, i.e. when --margin was not used -- that is the
+# normal case and must not warn.  Format is one tab-separated key/value per line, plus
+# repeated "score" lines holding the full per-taxon ranking, which we do not need here.
+#
+sub read_classification
+{
+	my($file) = @_;
+	return undef unless -s $file;
+
+	open(my $fh, "<", $file) or do { warn "Could not read $file: $!\n"; return undef; };
+	my %cls;
+	while (<$fh>)
+	{
+		chomp;
+		my($key, @val) = split /\t/;
+		next if $key eq "score";
+		$cls{$key} = $val[0];
+	}
+	close $fh;
+
+	# "inf" means nothing else was in contention; leave margin unset rather than
+	# putting a non-numeric value into the GTO.
+	delete $cls{margin} if defined $cls{margin} && $cls{margin} !~ /^[\d.]+$/;
+	$cls{margin} += 0            if defined $cls{margin};
+	$cls{runner_up_bit} += 0     if defined $cls{runner_up_bit};
+	$cls{below_threshold} += 0   if defined $cls{below_threshold};
+	delete $cls{runner_up} if defined $cls{runner_up} && $cls{runner_up} eq "-";
+	return \%cls;
+}
 
 
 
