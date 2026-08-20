@@ -319,7 +319,14 @@ meaningful codes start at 10 rather than 3. The table is in `-h`.
   actually written, not by a re-scan.
 - **Adding a code is cheap; changing one is not.** `pipeline_run*.sh` and the p3x wrapper treat
   non-zero as failure, so promoting a currently-silent condition to a new code changes their output
-  shape. Nothing currently distinguishes a BLAST crash from any other internal death.
+  shape.
+- **A failed BLAST is a 2** as of `1d5deb5`, which is what makes 11 worth acting on. `makeblastdb`,
+  `blastn` and `tblastn` all go through a status check; the two searches use a `blast_json()` helper
+  that runs, checks, *then* parses. The case that mattered was a non-zero exit after a valid but
+  empty report — previously just a genome with no features, i.e. an honest-looking 11. Commands are
+  arrayrefs through `IPC::Run`, not strings through a shell, so arguments need no quoting and a
+  signal is not masked as the shell's 128+n. Measured cost over the ~410 searches of a flu genome:
+  none. The two downstream stages check theirs too (previously warn-only, or discarded outright).
 
 The GTO wrapper **still exits 0 by default** and always writes the GTO; `--propagate-exit-status`
 makes it return the base script's code. Off by default because `p3x-annotate-lowvan.pl` runs all

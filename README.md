@@ -429,10 +429,15 @@ whatever `$!` happened to hold.  It now exits with a code that says which happen
 |---:|---|
 | 0 | features were called |
 | 1 | usage or configuration error -- bad flag, unknown taxon, unreadable JSON |
-| 2 | internal error |
+| 2 | internal error, including a BLAST program that failed or returned unparseable output |
 | 10 | no reference contig scored above `-mcb`, so no taxon could be chosen |
 | 11 | a taxon was chosen, but no PSSM cleared its `bit_cutoff` |
 | 12 | input length outside `-min`/`-max` |
+
+**A failed BLAST is a 2, not an 11.**  `makeblastdb`, `blastn` and `tblastn` are all checked, and a
+failure reports the program's own error along with the command that produced it.  This is what makes
+11 worth acting on: before the check, a BLAST that exited non-zero after writing a valid but empty
+report simply produced a genome with no features, which is indistinguishable from an honest 11.
 
 **10, 11 and 12 are not errors.** For a 200 bp fragment "nothing to annotate" is the right answer.
 What they mean for a caller is that there is nothing for the downstream stages to work on:
