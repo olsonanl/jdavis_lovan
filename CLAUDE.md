@@ -226,6 +226,30 @@ unrestricted one, and the genus-less B1 subset has median best hit 114 (max 149,
 that band is exactly where these records live. The intended use is a second pass at `-vfam` with a
 lowered `-mcb`, not `-vfam` alone.
 
+**Measured over all 322 genus-less genomes of the 5,000 sample, 2026-08-20** (raw:
+`failure-analysis/results-322-vfam150.tsv` / `-vfam50.tsv`, analysis in `rerun-5000-analysis.md`
+§6A):
+
+| arm | annotated | job exits 0 |
+|---|---:|---:|
+| pass 1, unrestricted | 28.0% | 28.0% |
+| `-vfam -mcb 150` | 28.0% | **75.5%** |
+| `-vfam -mcb 50` | **36.6%** | **92.9%** |
+
+- **The control arm is where the value is.** At `-mcb 150` the pass-1 → `-vfam` status transition is
+  the identity on all 322 rows and no genome changed genus, exactly as the arithmetic predicts — but
+  job success still rose 28.0% → 75.5%, because the sidecar sets `viral_family` and guard 2 stops
+  firing. 153 jobs recovered with no new classification calls, hence no accuracy risk. Adopt this.
+- **`-mcb 50` is on hold.** It adds 28 annotated genomes, but of the 58 newly-classified only 9 have
+  an organism name that decides the genus, and those go 6 right / 2 wrong / 1 out of scope. Do not
+  reuse the ~93% band-validation figure here: that validation was drawn from records whose lineage
+  resolves to a LowVan taxon, and this population is enriched for divergent and unrepresented
+  viruses (two "Langya virus" records called Jeilongvirus; a letovirus called Alphacoronavirus).
+- **Guard 1 counts all features, not LowVan features.** A genome with zero LowVan features still
+  exits 0 when the input GTO carried GenBank features. Only `gb_feats = 0` records die there.
+- 90/90 agreement with pass 1's unrestricted genus on the rows pass 1 annotated, at both cutoffs;
+  0 of 322 chose a different genus at 50 than at 150.
+
 Implementation notes:
 
 - `-vtax` semantics are untouched. Exact taxon match is tried first, so the eight Bunyavirales names
@@ -304,6 +328,13 @@ resumable and default to `P=48`. `pipeline_summarize.py` / `pipeline_summarize_v
 every number in `LOWVAN-FAILURE-ANALYSIS.md`. Raw output for the 5,000-genome run of 2026-08-19/20
 is in `results-5000-pass1.tsv`, `results-5000-pass2-vtax.tsv`, `results-5000-b1-subthreshold.tsv`
 and `results-5000-b2-maxbit.tsv`.
+
+`pipeline_driver_vfam.sh` / `pipeline_run_vfam.sh` / `pipeline_summarize_vfam.py` are the third
+pass — family-scoped classification over the 322 genus-less rows, one `-mcb` per run
+(`MCB=50 bash failure-analysis/pipeline_driver_vfam.sh`), defaulting to `P=32`. Raw output:
+`results-322-vfam150.tsv`, `results-322-vfam50.tsv`, plus
+`vfam-newly-classified-organisms.tsv` (the 58 newly-classified genomes with their GenBank organism
+names, which is the only accuracy evidence this subset admits).
 
 **Copy the tree and the GenBank inputs to `/tmp` first.** `/home/olson` and `/home/mshukla` are
 NFS, one genome costs ~410 `tblastn` invocations each opening a PSSM file, and throughput at P=48
