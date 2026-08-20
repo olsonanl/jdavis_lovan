@@ -207,6 +207,13 @@ job — see the evidence above and `failure-analysis/margin-scoring.md`.
 - **Off by default and deliberately un-defaulted.** The 1.3 that separates the historical bad call
   is fitted to one counter-example, and `19c94c7` removed that counter-example. Don't promote it to
   a default without a second case.
+- **At 5,000 genomes there is no second case, and no signal.** Over the 3,747 calls with a lineage
+  truth, nine of the ten wrong calls sit at margins 1.52–2.14 and one at 19.75, while correct calls
+  start at 1.04 (p1 = 1.70). A threshold of 1.5 catches **zero** of the ten; 2.25 catches nine but
+  flags 117 genomes to do it, 108 of them correct. Margin does not separate right calls from wrong
+  ones on this population — keep it as a per-genome diagnostic, don't treat it as a classifier, and
+  don't spend a rerun testing a new threshold: the column is recorded for every genome, so any
+  threshold can be evaluated after the fact from `failure-analysis/results-5000-pass1.tsv`.
 - It **never rejects.** It warns on stderr and records. For the failure set a flagged annotation is
   worth more than another dead job.
 - The runner-up is free: `%taxon_best` already holds each taxon's best score from the sweep. That
@@ -238,6 +245,52 @@ scripts and raw results:
   500-genome numbers
 - `job-log-scan-5000.tsv` — the production stdout/stderr scan that confirmed the rc cascade at
   scale, from `/home/olson/P3/dev-ubuntu/modules/bvbrc_lowvan/Viral_Annotation/jobs_failed_output/`
+
+### Rerunning the pipeline in bulk
+
+The `pipeline_*` scripts run the **whole four-stage pipeline** over a sample, not just
+classification. `pipeline_env.sh` is the entry point for all of them; `pipeline_driver.sh` (plain
+`--min 1`) and `pipeline_driver_vtax.sh` (`--viral-taxon` on whatever the first pass failed) are
+resumable and default to `P=48`. `pipeline_summarize.py` / `pipeline_summarize_vtax.py` regenerate
+every number in `LOWVAN-FAILURE-ANALYSIS.md`. Raw output for the 5,000-genome run of 2026-08-19/20
+is in `results-5000-pass1.tsv`, `results-5000-pass2-vtax.tsv`, `results-5000-b1-subthreshold.tsv`
+and `results-5000-b2-maxbit.tsv`.
+
+**Copy the tree and the GenBank inputs to `/tmp` first.** `/home/olson` and `/home/mshukla` are
+NFS, one genome costs ~410 `tblastn` invocations each opening a PSSM file, and throughput at P=48
+was *lower* than at P=20 with the 96 CPUs 96% idle — the filer, not the CPU, is the resource.
+`pipeline_env.sh` encodes the tmpfs paths and the rsync commands; read its header before changing
+`REPO`. The repo must also stay first on `PATH`: the P3 env ships a deployed
+`annotate_by_viral_pssm.pl` predating `-vtax`.
+
+The same trap applies to anything else that fans out over the PSSM set — process startup (0.142 s)
+dwarfs the alignment (0.005 s), so one BLAST call per (genome, PSSM) pair is the wrong shape. Batch
+all genomes of a taxon into one database and issue one call per PSSM instead, as
+`pipeline_b2_maxbit.sh` does. If you do, raise `-evalue`: it scales with database size and the
+default silently clips marginal HSPs a single-genome search would report.
+
+### What the 5,000-genome rerun established (2026-08-19/20)
+
+Baseline is 0% — every genome in the sample is a production failure.
+
+| Lever | Effect | |
+|---|---|---|
+| `--min 1` | **67.5%** annotated | The gate excludes 94.1% of the failure set; nothing else comes close |
+| `-vtax` from the GenBank lineage | +14.2 pts annotated, **+24.7 pts job success** | Recovers 76.7% of classification failures and **0%** of the other bucket, by construction |
+| `-mcb 50` | 41.3% of the residual B1 at 92.7% accuracy | Accuracy is flat 89–94% from 125 down to 40, then collapses. Not for the normal production path |
+| Lowering `bit_cutoff` | ~nothing | 606 of 620 "classified but no features" genomes have no HSP above 100 bits at all; median best is 24 |
+| `-margin` | nothing | See above |
+
+Combined: **81.7% annotated, 92.2% exit 0.** The 522 jobs that succeed with an empty annotation are
+the point of `-vtax`, not a defect — for a 200 bp fragment "annotated nothing" is the right answer,
+and it is what turns a rc=255 three stages downstream into a legible result. Everything still
+failing after both passes dies at guard 1 (`No features in GTO`), which is now the only remaining
+structural cause.
+
+Two data defects surfaced, both recorded in `UPSTREAM-ISSUES.md` with the measured impact: the
+post-stop-codon coverage recheck (fires 33 times in 20 of 5,000 genomes, all genuinely
+low-coverage — the evidence issue #4 asked for before keeping the correction), and the orphaned
+`Orthorubulavirus` `P-ORF2`/`I-ORF2` PSSM directories.
 
 ## Dependencies
 
