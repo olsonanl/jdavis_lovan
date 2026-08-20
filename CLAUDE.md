@@ -47,6 +47,11 @@ of them. This is the single most common production failure mode — see
   it disagrees; the `-mcb` rejection is downgraded to a warning. Closest-genome columns then
   report the best rep *within* the declared taxon.
 - `-list-vtax` Print the valid `-vtax` values to stdout and exit (works without `-i`)
+- `-vfam` Declare only the *family* and let BLASTn choose the genus within it, for records whose
+  lineage stops above genus. Restricts the reference sweep to that family's taxa. **Unlike `-vtax`
+  it still makes a call, so `-mcb` applies normally and a below-cutoff genome is still rejected.**
+  See "Family-scoped classification" below. Incompatible with `-vtax` and `-skip-classification`.
+- `-list-vfam` Print the valid `-vfam` values (13 families) and exit
 - `-skip-classification` With `-vtax`, BLASTn only the declared taxon's own reference contigs
   (1–14 files) instead of all 87. Saves a flat ~12.8 s/genome (measured 2026-08-19: 0.149 s per
   blastn invocation, and the sweep grows with every reference added); the cost is that no
@@ -89,6 +94,13 @@ Influenza A is `Alphainfluenzavirus` and Ebola is `Orthoebolavirus`. `Orthopneum
 prefix of `Orthopneumovirus_muris`, so any lookup on these names must be exact-string — never a
 prefix, glob, or substring match. Segmented genomes take one taxon for the whole genome; segment
 identity comes from the per-feature `segments` block in the JSON.
+
+Each taxon also carries a **`family` scalar** in `Viral_PSSM.json` — the ICTV family it belongs to,
+which is what `-vfam` groups on. Thirteen distinct values: Coronaviridae (4 taxa), Orthomyxoviridae
+(5), Filoviridae (2), Paramyxoviridae (12), Pneumoviridae (3), and the eight Bunyavirales families,
+which are annotation taxa themselves and so map to their own name. The field is **required** —
+`taxon_family_map` dies naming every taxon that lacks one, so a new taxon cannot be added without
+placing it in a family.
 
 ### PSSM Generation (Other_Scripts/)
 The `fasta-cluster-pssm-2.pl` script builds PSSMs from protein FASTA:
@@ -197,6 +209,39 @@ failure-driven. The larger
 remaining gap is not references at all: Dianlovirus, Thamnovirus, Oblavirus, Striavirus and
 Parajeilongvirus are **missing taxa**, with no PSSM set or JSON entry, so adding a reference contig
 for them would route records to a taxon that cannot annotate them.
+
+## Family-scoped classification (`-vfam`)
+
+For the 7.2% of the failure set whose GenBank lineage stops above genus, `-vtax` is unusable —
+there is no genus to declare. `-vfam` restricts the classification sweep to the reference contigs
+of one family's taxa and lets BLASTn pick among them.
+
+**The arithmetic that governs when it helps.** Restricting the reference set can only *lower* the
+maximum bit score, so `best_within_family ≤ best_overall`: a genome rejected by `-mcb` unrestricted
+is still rejected under `-vfam`. Restriction rescues nothing on its own, and it was a mistake to
+expect it to. What it changes is the *reliability of a call in the band below the cutoff* — the
+validated rescue numbers in `LOWVAN-FAILURE-ANALYSIS.md` ("Rescuing the genus-less 7.2% by BLAST")
+give ~93% accuracy for a family-restricted call in the 50–150 bit band against roughly 60% for an
+unrestricted one, and the genus-less B1 subset has median best hit 114 (max 149, zero at ≥150), so
+that band is exactly where these records live. The intended use is a second pass at `-vfam` with a
+lowered `-mcb`, not `-vfam` alone.
+
+Implementation notes:
+
+- `-vtax` semantics are untouched. Exact taxon match is tried first, so the eight Bunyavirales names
+  keep meaning what they meant; only a name that is *not* a taxon but *is* a family falls through to
+  `-vfam`, with a note on stderr. That ordering is load-bearing — don't reverse it.
+- `-mcb` is deliberately reused as the floor rather than adding a second knob, and the below-floor
+  path exits 1 exactly as the undeclared path does. `-vtax`'s "downgrade the rejection to a warning"
+  exception does **not** extend to `-vfam`.
+- The `<prefix>.classification` sidecar is written under `-vfam` as well as `-margin`, with three
+  extra lines (`scope family`, `family <name>`, `min_contig_bit <n>`). This is what lets the GTO
+  wrapper recover the chosen genus when the annotation comes back empty: `viral_family` falls back
+  to the sidecar's `annotated_as`, so guard 2 passes and the downstream stages run.
+- The within-family margin is printed whether or not `-margin` is given, and is more meaningful than
+  the unrestricted one — the runner-up is a sibling genus, not an unrelated family.
+- The GTO wrapper gained `--min-contig-bit` (passed through as `-mcb`) at the same time; it had
+  never surfaced the contig-bitscore gate, which made `--viral-family` useless from that path.
 
 ## Margin scoring (`-margin`)
 

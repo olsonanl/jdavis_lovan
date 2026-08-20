@@ -18,6 +18,7 @@
             "genome_name" : "Human coronavirus 229E"
          }
       },
+      "family" : "Coronaviridae",
       "features" : {
          "E" : {
             "anno" : "Envelope protein",
@@ -466,6 +467,7 @@
             "genome_name" : "Influenza A virus (A/New York/392/2004(H3N2))"
          }
       },
+      "family" : "Orthomyxoviridae",
       "features" : {
          "HA" : {
             "anno" : "Hemagglutinin precursor",
@@ -765,6 +767,7 @@
             "genome_name" : "Salmon aquaparamyxovirus ASPV/Yrkje371/95"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -916,6 +919,7 @@
             "genome_name" : "BaTang virus strain O.Curzoniae/YS216_2015/F"
          }
       },
+      "family" : "Arenaviridae",
       "features" : {
          "GP1" : {
             "anno" : "Mature N-terminal envelope glycoprotein Gn",
@@ -1095,6 +1099,7 @@
             "genome_name" : "Middle East respiratory syndrome-related coronavirus strain HCoV-EMC"
          }
       },
+      "family" : "Coronaviridae",
       "features" : {
          "E" : {
             "anno" : "Envelope protein",
@@ -1850,6 +1855,7 @@
             "genome_name" : "Influenza B virus (B/Lee/1940)"
          }
       },
+      "family" : "Orthomyxoviridae",
       "features" : {
          "BM2" : {
             "anno" : "Proton channel BM2 protein",
@@ -2090,6 +2096,7 @@
             "genome_name" : "Porcine coronavirus HKU15 strain HKU15-155"
          }
       },
+      "family" : "Coronaviridae",
       "features" : {
          "E" : {
             "anno" : "Envelope protein",
@@ -2514,6 +2521,7 @@
             "genome_name" : "Influenza D virus D/swine/Oklahoma/1334/2011"
          }
       },
+      "family" : "Orthomyxoviridae",
       "features" : {
          "DM1" : {
             "PMID" : [
@@ -2719,6 +2727,7 @@
             "genome_name" : "Reptilian ferlavirus ATCC VR-895"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -2876,6 +2885,7 @@
             "genome_name" : "Aspen mosaic-associated virus"
          }
       },
+      "family" : "Fimoviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",
@@ -3106,6 +3116,7 @@
             "genome_name" : "Turkey coronavirus MG10"
          }
       },
+      "family" : "Coronaviridae",
       "features" : {
          "E" : {
             "anno" : "Envelope protein",
@@ -3702,6 +3713,7 @@
             "genome_name" : "Influenza C virus (C/Ann Arbor/1/50)"
          }
       },
+      "family" : "Orthomyxoviridae",
       "features" : {
          "CM1" : {
             "PMID" : [
@@ -3976,6 +3988,7 @@
             "genome_name" : "Wenling minipizza batfish hantavirus strain XQTMS16810 nucleoprotein gene"
          }
       },
+      "family" : "Hantaviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",
@@ -4076,6 +4089,7 @@
             "genome_name" : "Hendra henipavirus"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -4212,6 +4226,7 @@
             "genome_name" : "Salmon isavirus CCBB"
          }
       },
+      "family" : "Orthomyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -4405,6 +4420,7 @@
             "genome_name" : "Beilong virus"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -4570,6 +4586,7 @@
             "genome_name" : "Avian metaavulavirus 6 APMV-6/Goose/FarEast/4440/2003"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -4706,6 +4723,7 @@
             "genome_name" : "Human metapneumovirus 00-1"
          }
       },
+      "family" : "Pneumoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein precursor F0",
@@ -4909,6 +4927,7 @@
             "genome_name" : "Measles morbillivirus Ichinose-B95a"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -5044,6 +5063,7 @@
             "genome_name" : "Beiji nairovirus strain H160"
          }
       },
+      "family" : "Nairoviridae",
       "features" : {
          "GP38" : {
             "anno" : "Mature secreted nonstructural 38-kDa protein",
@@ -5188,6 +5208,7 @@
             "genome_name" : "Tupaia paramyxovirus"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -5329,6 +5350,7 @@
             "genome_name" : "Avian orthoavulavirus 9 duck/New York/22/1978"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -5454,6 +5476,7 @@
             "genome_name" : "Zaire ebolavirus"
          }
       },
+      "family" : "Filoviridae",
       "features" : {
          "Delta" : {
             "PMID" : [
@@ -5686,6 +5709,7 @@
             "genome_name" : "Ravn virus - Ravn"
          }
       },
+      "family" : "Filoviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",
@@ -5844,6 +5868,7 @@
             "genome_name" : "Respiratory syncytial virus S2 ts1C"
          }
       },
+      "family" : "Pneumoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein precursor F0",
@@ -6087,6 +6112,7 @@
             "genome_name" : "Pneumonia virus of mice J3666"
          }
       },
+      "family" : "Pneumoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein precursor F0",
@@ -6322,6 +6348,7 @@
             "genome_name" : "Mammalian orthorubulavirus 5 W3A"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -6462,6 +6489,7 @@
             "genome_name" : "Avian paramyxovirus 4 isolate APMV-4/KR/YJ/06"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -6587,6 +6615,7 @@
             "genome_name" : "Tuhoko virus 1"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "F" : {
             "anno" : "Fusion glycoprotein",
@@ -6728,6 +6757,7 @@
             "genome_name" : "Schmallenberg virus isolate F6"
          }
       },
+      "family" : "Peribunyaviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",
@@ -6850,6 +6880,7 @@
             "genome_name" : "MAG: Bactrocera latifrons orthophasmavirus isolate Bl-V3 "
          }
       },
+      "family" : "Phasmaviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",
@@ -6990,6 +7021,7 @@
             "genome_name" : "Brown dog tick phlebovirus 2 strain GD-JY01"
          }
       },
+      "family" : "Phenuiviridae",
       "features" : {
          "78-kD" : {
             "anno" : "Mature nonstructural 78-kDa protein",
@@ -7133,6 +7165,7 @@
             "genome_name" : "Human respirovirus 3"
          }
       },
+      "family" : "Paramyxoviridae",
       "features" : {
          "C" : {
             "anno" : "C protein",
@@ -7316,6 +7349,7 @@
             "genome_name" : "Groundnut bud necrosis virus isolate Coimbatore"
          }
       },
+      "family" : "Tospoviridae",
       "features" : {
          "GPC" : {
             "anno" : "Pre-glycoprotein polyprotein GP complex",

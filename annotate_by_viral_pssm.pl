@@ -22,6 +22,18 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
 		     NOTE: this value also becomes viral_family in the GTO, which selects
 		     the Transcript-Editing/ and Splice-Variants/ dirs used downstream.
 		-list-vtax  Print the valid -vtax values to STDOUT and exit.
+		-vfam Declare the annotation *family* when the genus is not known, and let
+		     BLASTn pick the genus within it.  The reference sweep is restricted to
+		     the reps of the taxa in that family, so a record whose lineage stops at
+		     family ("Bat coronavirus", "Paramyxoviridae sp.") can still be placed.
+		     Use -list-vfam for the valid names.  Unlike -vtax this still has to make
+		     a call, so -mcb applies normally and a genome that clears nothing is
+		     still rejected -- pair it with a lower -mcb to work the 50-150 bit band,
+		     where a family-restricted call is right about 93% of the time against
+		     roughly 60% for an unrestricted one.  Cannot be combined with -vtax or
+		     -skip-classification.  -margin works and is more meaningful here: the
+		     runner-up is a sibling genus rather than an unrelated family.
+		-list-vfam  Print the valid -vfam values to STDOUT and exit.
 		-skip-classification  Only BLASTn the reference contigs belonging to the
 		     declared -vtax taxon (1-14 files) instead of every rep in -c.  Requires -vtax.  Cuts the
 		     dominant cost of a run; the tradeoff is that no cross-check against
@@ -77,7 +89,8 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			8	end	
  			9	strand	
  			10	na_length	
- 			11	annotation taxon (BLASTn-detected, or declared with -vtax)
+ 			11	annotation taxon (BLASTn-detected, declared with -vtax, or picked
+ 			    within a declared family with -vfam)
  			12	closest genome (best rep within the annotation taxon)
  			13	closest genome bit score (BLASTn of contigs)
  			14  closest genome id(s)
@@ -87,7 +100,7 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			18	AA sequence (if -s append sequences)
 ';
 
-my ($help, $opt_file, $contig_file, $tmp, $tax, $vtax, $list_vtax, $skip_class, $keep_stop, $genome_name, $cdir, $pdir, $keep_temp, $min_len, $max_len, $aa_only, $dna_only, $tbl_only, $no_out, $ctbl, $prefix, $append_seqs, $threads, $min_contig_bit, $min_margin);
+my ($help, $opt_file, $contig_file, $tmp, $tax, $vtax, $list_vtax, $vfam, $list_vfam, $skip_class, $keep_stop, $genome_name, $cdir, $pdir, $keep_temp, $min_len, $max_len, $aa_only, $dna_only, $tbl_only, $no_out, $ctbl, $prefix, $append_seqs, $threads, $min_contig_bit, $min_margin);
 
 my $opts = GetOptions( 'h'         => \$help,
                        'tmp'       => \$keep_temp,
@@ -100,6 +113,8 @@ my $opts = GetOptions( 'h'         => \$help,
                        'tax=s'     => \$tax,
                        'vtax=s'    => \$vtax,
                        'list-vtax' => \$list_vtax,
+                       'vfam=s'    => \$vfam,
+                       'list-vfam' => \$list_vfam,
                        'skip-classification' => \$skip_class,
                        'threads=s' => \$threads,
                        't=s'       => \$tmp,
@@ -116,7 +131,7 @@ my $opts = GetOptions( 'h'         => \$help,
                        's'         => \$append_seqs); 
 
 if ($help){die "$usage\n";}
-unless ($contig_file || $list_vtax){die "must declare an input subject file with -i \n\n$usage\n";}
+unless ($contig_file || $list_vtax || $list_vfam){die "must declare an input subject file with -i \n\n$usage\n";}
 
 # Name the Temp file:
 # generates a random 20 digit string of 0-9a-f
@@ -145,11 +160,34 @@ close IN;
 ## bad name fails without leaving anything behind on disk.
 
 my @valid_vtax = valid_vtax_list($pdir, $options);
+my %taxon_family = taxon_family_map($options, \@valid_vtax);
+my @valid_vfam   = do { my %s; $s{$_}++ for values %taxon_family; sort keys %s };
 
 if ($list_vtax)
 {
 	print "$_\n" foreach @valid_vtax;
 	exit(0);
+}
+
+if ($list_vfam)
+{
+	print "$_\n" foreach @valid_vfam;
+	exit(0);
+}
+
+# -vfam and -vtax are different claims about how much the caller knows, and they cannot
+# both be true: -vtax says "annotate as this, do not decide", -vfam says "decide, but only
+# among these".  Combining them would silently ignore one.
+# Checked before the -skip-classification rule below so the more specific message wins.
+if ((defined $vfam) && (defined $vtax))
+{
+	die "-vfam and -vtax cannot be combined: -vtax declares the annotation taxon outright,\n"
+	  . "-vfam asks BLASTn to choose one within a family. Use whichever matches what is known.\n";
+}
+if ((defined $vfam) && $skip_class)
+{
+	die "-vfam and -skip-classification cannot be combined: -vfam already restricts the sweep,\n"
+	  . "and the genus still has to be chosen from the reps it leaves.\n";
 }
 
 if ($skip_class && (! defined $vtax))
@@ -179,19 +217,60 @@ if (defined $vtax)
 
 	# Exact match first.  This is what keeps -vtax Orthopneumovirus from ever
 	# resolving to Orthopneumovirus_muris -- never use prefix/substring matching here.
+	# It also settles the eight Bunyavirales names, which are both annotation taxa and
+	# families: as taxa they win here, and -vfam on them would mean the same thing
+	# anyway because each is the only member of its own family.
 	unless ($exact{$vtax})
 	{
+		my %fam_fold = map {(lc($_) => $_)} @valid_vfam;
+
 		if (exists $fold{lc $vtax})
 		{
 			print STDERR "Interpreting -vtax '$vtax' as '$fold{lc $vtax}'\n";
 			$vtax = $fold{lc $vtax};
+		}
+		elsif (exists $fam_fold{lc $vtax})
+		{
+			# A family name given to -vtax is the natural thing to type when the
+			# lineage stopped at family.  Honour it as -vfam rather than dying on a
+			# technicality, but say so: the semantics differ (this one still decides).
+			$vfam = $fam_fold{lc $vtax};
+			print STDERR "-vtax '$vtax' is a family, not an annotation taxon; "
+			           . "treating it as -vfam $vfam (BLASTn will choose the genus within it).\n";
+			undef $vtax;
 		}
 		else
 		{
 			die "Unknown -vtax value '$vtax'.\n"
 			  . "Valid annotation taxa (PSSM dirs in $pdir that also have a $opt_file entry):\n"
 			  . join("", map {"\t$_\n"} @valid_vtax)
-			  . "Use -list-vtax to print this list.\n";
+			  . "Use -list-vtax to print this list, or -vfam / -list-vfam to declare only a family.\n";
+		}
+	}
+}
+
+# -vfam: restrict rather than declare.  Resolved the same way as -vtax -- exact first,
+# case-fold as a courtesy -- against the family names carried in the JSON options file.
+if (defined $vfam)
+{
+	$vfam =~ s/^\s+|\s+$//g;
+
+	my %exact_f = map {($_ => 1)} @valid_vfam;
+	my %fold_f  = map {(lc($_) => $_)} @valid_vfam;
+
+	unless ($exact_f{$vfam})
+	{
+		if (exists $fold_f{lc $vfam})
+		{
+			print STDERR "Interpreting -vfam '$vfam' as '$fold_f{lc $vfam}'\n";
+			$vfam = $fold_f{lc $vfam};
+		}
+		else
+		{
+			die "Unknown -vfam value '$vfam'.\n"
+			  . "Valid families (the \"family\" field of each taxon in $opt_file):\n"
+			  . join("", map {"\t$_\n"} @valid_vfam)
+			  . "Use -list-vfam to print this list.\n";
 		}
 	}
 }
@@ -280,6 +359,26 @@ if ($skip_class)
 	       scalar @reps, $before, $vtax;
 }
 
+# -vfam: same filter, widened from one taxon to one family.  What is left is still a
+# classification -- the winner among these reps becomes the annotation taxon -- so unlike
+# -skip-classification this does not weaken the -mcb decision, it only narrows the field
+# it is made over.  Restricting can never raise a bit score, so this cannot rescue a
+# genome that scores below -mcb against everything; what it buys is that the call made in
+# the band above -mcb is constrained to the family the submitter already told us.
+if (defined $vfam)
+{
+	my $before = scalar @reps;
+	@reps = grep { my $t = $_; $t =~ s/\..+//g;
+	               defined $taxon_family{$t} && $taxon_family{$t} eq $vfam } @reps;
+	unless (@reps)
+	{
+		die "-vfam: no reference contigs for any taxon of family $vfam in $cdir\n";
+	}
+	my %in_scope = map {my $t = $_; $t =~ s/\..+//g; ($t => 1)} @reps;
+	printf STDERR "Restricting BLASTn sweep to %d of %d reference contigs (-vfam %s: %s)\n",
+	       scalar @reps, $before, $vfam, join(", ", sort keys %in_scope);
+}
+
 my $best_contig_bit = 0;
 my $best_virus_match;
 my $best_rep;
@@ -339,6 +438,15 @@ if ($best_contig_bit < $min_contig_bit)
 		           . (defined $best_rep ? $best_rep : "none") . ", bit = $best_contig_bit); "
 		           . "continuing because -vtax $vtax was declared.\n";
 	}
+	elsif (defined $vfam)
+	{
+		# The family was declared but nothing in it scored.  Say which reps were
+		# actually searched, so this is not confused with the unrestricted failure:
+		# a -vfam run that fails here would have failed unrestricted too.
+		print STDERR "No reference contig of family $vfam scored above -mcb $min_contig_bit "
+		           . "(best = " . (defined $best_rep ? $best_rep : "none") . ", bit = $best_contig_bit).\n";
+		exit(1);
+	}
 	else
 	{
 		print STDERR "No matching reference contigs with bit score greater than $min_contig_bit\n";
@@ -369,8 +477,15 @@ if ((! $skip_class) && (defined $vtax) && (defined $best_virus_match) && ($best_
 # no extra BLAST.  This warns and records; it never rejects, because for the failure
 # set a wrong-but-flagged annotation is more useful than another dead job.
 
+#
+# The sidecar is also written under -vfam, with no -margin.  A family-restricted call is
+# a decision the caller asked us to make on partial information, usually in the band where
+# -mcb was relaxed, so the losing siblings and their scores are the evidence for it and
+# have to survive the run.  It is also what lets the GTO wrapper recover the chosen genus
+# when the annotation comes back empty -- there is no feature table to read it off.
+#
 my ($margin, $runner_up, $runner_up_bit);
-if (defined $min_margin)
+if ((defined $min_margin) || (defined $vfam))
 {
 	# rank taxa by their best bit score; the winner is $best_virus_match by construction
 	my @ranked = sort {$taxon_best{$b}->[0] <=> $taxon_best{$a}->[0]} keys %taxon_best;
@@ -387,7 +502,16 @@ if (defined $min_margin)
 	        : undef;
 
 	my $shown = defined $margin ? sprintf("%.2f", $margin) : "inf";
-	if (defined $margin && $margin < $min_margin)
+	if (! defined $min_margin)
+	{
+		# -vfam without -margin: report, do not judge.  Within a family the runner-up
+		# is a sibling genus, so this ratio is a more meaningful number than the
+		# cross-family one -- but no threshold has been calibrated for it either.
+		print STDERR "Within-family margin $shown"
+		           . (defined $runner_up ? " (runner-up $runner_up, bit = $runner_up_bit)" : " (no runner-up taxon in $vfam)")
+		           . "\n";
+	}
+	elsif (defined $margin && $margin < $min_margin)
 	{
 		printf STDERR "WARNING: low classification margin %.2f (< -margin %s): %s scored %s but "
 		            . "%s scored %s. The winning taxon is only %.0f%% ahead of the runner-up; "
@@ -418,8 +542,19 @@ if (defined $min_margin)
 		print $cls "runner_up\t" . (defined $runner_up ? $runner_up : "-") . "\n";
 		print $cls "runner_up_bit\t" . (defined $runner_up_bit ? $runner_up_bit : 0) . "\n";
 		print $cls "margin\t$shown\n";
-		print $cls "margin_threshold\t$min_margin\n";
-		print $cls "below_threshold\t" . ((defined $margin && $margin < $min_margin) ? 1 : 0) . "\n";
+		if (defined $min_margin)
+		{
+			print $cls "margin_threshold\t$min_margin\n";
+			print $cls "below_threshold\t" . ((defined $margin && $margin < $min_margin) ? 1 : 0) . "\n";
+		}
+		# Scope of the sweep the numbers above came out of.  Without this a -vfam
+		# ranking reads like a full one that happened to find only sibling genera.
+		if (defined $vfam)
+		{
+			print $cls "scope\tfamily\n";
+			print $cls "family\t$vfam\n";
+			print $cls "min_contig_bit\t$min_contig_bit\n";
+		}
 		print $cls "annotated_as\t$virus\n";
 		# full ranking, so a near-tie can be inspected without rerunning the sweep
 		for my $t (@ranked)
@@ -443,10 +578,12 @@ if (defined $anno_rep)
 	$best_rep_name = $options->{$virus}->{close_genomes}->{$anno_rep}->{genome_name};
 }
 
-print STDERR "-----------------------\nAnnotating as $virus\tBit = $anno_bit"
-           . (defined $vtax ? ($skip_class ? "\t(taxon declared with -vtax, sweep restricted)"
-                                                   : "\t(taxon declared with -vtax)") : "")
-           . "\n-----------------------\n"; 
+my $how = defined $vtax ? ($skip_class ? "\t(taxon declared with -vtax, sweep restricted)"
+                                       : "\t(taxon declared with -vtax)")
+        : defined $vfam ? "\t(genus chosen within declared family $vfam)"
+        :                 "";
+print STDERR "-----------------------\nAnnotating as $virus\tBit = $anno_bit$how"
+           . "\n-----------------------\n";
 opendir (DIR, "$pdir/$virus.pssms");
 my @pssm_dirs = sort grep{$_ !~ /^\./}readdir(DIR);  # reads the directory of PSSM dirs (sorted: gist #19)
 closedir(DIR);
@@ -1201,5 +1338,44 @@ sub valid_vtax_list
 		push @names, $name if exists $options->{$name};
 	}
 	return @names;
+}
+
+##########################sub taxon_family_map##############
+# taxon => family, read from the "family" field of each annotation taxon in the JSON
+# options file.  This is the only place family membership is recorded: the 34 taxon names
+# are a mix of ranks (8 families, 25 genera, 1 species), so it cannot be derived from the
+# names, and the reference filenames carry the taxon but not its parent.
+#
+# Eight taxa are their own family -- the Bunyavirales entries, where LowVan resolves no
+# deeper -- so a family may map to exactly one taxon.  That is not an error; -vfam on such
+# a family is simply equivalent to -vtax on the taxon.
+#
+# Dies on a missing field rather than defaulting.  A taxon with no family would silently
+# drop out of every -vfam sweep, which is the sort of thing that shows up as an
+# unexplained classification failure months later.
+#
+#   my %family = taxon_family_map($options, \@valid_vtax);
+#
+#----------------------------------------------------------
+sub taxon_family_map
+{
+	my ($options, $taxa) = @_;
+
+	my %map;
+	my @missing;
+	foreach my $t (@$taxa)
+	{
+		my $f = $options->{$t}->{family};
+		if (defined $f && $f ne "") { $map{$t} = $f }
+		else                        { push @missing, $t }
+	}
+
+	if (@missing)
+	{
+		die "No \"family\" field for these annotation taxa in the JSON options file:\n"
+		  . join("", map {"\t$_\n"} @missing)
+		  . "Every taxon needs one; -vfam and -list-vfam are built from them.\n";
+	}
+	return %map;
 }
 ###########################################################

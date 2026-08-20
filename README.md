@@ -123,6 +123,8 @@ Options include:
 		-tax declare a taxonomy id (D = 11158 )
 		-vtax declare the annotation taxon, instead of detecting it by BLASTn (see below)
 		-list-vtax print the valid -vtax values and exit
+		-vfam declare only the family, and let BLASTn pick the genus within it (see below)
+		-list-vfam print the valid -vfam values and exit
 		-skip-classification with -vtax, only BLASTn that taxon own reference contigs (bulk reruns)
 		-margin minimum winner/runner-up bit score ratio, e.g. -margin 1.3 (off by default; warns
 		   and records, never rejects -- see below)
@@ -240,6 +242,75 @@ Things that trip people up:
   transcript-editing directory and only 5 have a splice-variant one, so declaring the taxon can
   turn those steps on or off.
 
+## Declaring only the family with -vfam
+
+`-vtax` needs the genus.  A great many GenBank records do not have one: "Bat coronavirus HKU10",
+"Paramyxoviridae sp.", anything submitted before its genus existed.  In the 5,000-genome failure-set
+rerun, 322 records (7.2%) had a lineage that stopped above genus, so `-vtax` could not be used on
+them at all.
+
+`-vfam` takes the rank they do have.  It restricts the classification BLASTn to the reference
+contigs of the taxa in that family and lets BLASTn choose among them:
+
+```
+annotate_by_viral_pssm.pl -i contigs.fasta -p out -vfam Coronaviridae -mcb 50
+annotate_by_viral_pssm-GTO.pl -i in.gto -o out.gto --viral-family Coronaviridae --min-contig-bit 50
+```
+
+```
+Restricting BLASTn sweep to 10 of 87 reference contigs (-vfam Coronaviridae: Alphacoronavirus,
+Betacoronavirus, Deltacoronavirus, Gammacoronavirus)
+Within-family margin 1.11 (runner-up Gammacoronavirus, bit = 133.176)
+Annotating as Betacoronavirus   Bit = 148.252   (genus chosen within declared family Coronaviridae)
+```
+
+**It is a different kind of flag from `-vtax`, and the difference is the whole point.**  `-vtax`
+declares an answer, so it never rejects.  `-vfam` still has to *make* a call, so `-mcb` applies
+normally and a genome that clears nothing is rejected exactly as it would be with no declaration.
+
+That also means restriction alone rescues nothing: throwing references away can only lower the best
+bit score, so a genome that failed `-mcb 150` unrestricted still fails it under `-vfam`.  What
+`-vfam` buys is *trustworthiness in the band below the cutoff*, which is where these records
+actually sit -- the genus-less failures have a median best hit of 114 bits.  Pair it with a lowered
+`-mcb`:
+
+| | unrestricted | `-vfam` |
+|---|---|---|
+| accuracy of a call in the 50-150 bit band | ~60% | ~93% |
+| what a wrong call costs | an unrelated family's PSSMs | a sibling genus' PSSMs |
+
+An unrestricted near-miss can land anywhere; a family-restricted one is wrong only between close
+relatives, whose PSSM sets overlap.  So `-vfam -mcb 50` is a reasonable second pass over records
+that failed classification and have no genus, in a way that a bare `-mcb 50` is not.
+
+`-margin` is also more informative here, because the runner-up is a sibling genus rather than an
+unrelated family.  With `-vfam` the within-family margin is printed whether or not you pass
+`-margin`, and the `<prefix>.classification` sidecar is written either way, with three extra lines:
+
+```
+scope           family
+family          Coronaviridae
+min_contig_bit  50
+```
+
+The GTO wrapper puts `classification_scope` and `classification_family` on the `close_genomes`
+record, and -- importantly -- falls back to the sidecar's `annotated_as` when setting
+`viral_family`.  A `-vfam` run that finds no features still emits a GTO with `viral_family` set, so
+the downstream transcript-editing, splice-variant and quality steps run to completion instead of
+dying on `GTO has no viral_family field`.
+
+Other behaviour:
+
+- Valid values come from a `family` field on each taxon in `Viral_PSSM.json`; run
+  `annotate_by_viral_pssm.pl -list-vfam` for the list.  There are **13**: `Coronaviridae`,
+  `Filoviridae`, `Orthomyxoviridae`, `Paramyxoviridae`, `Pneumoviridae`, and the eight Bunyavirales
+  families, which are annotation taxa in their own right.
+- For those eight, `-vfam` degenerates to a one-taxon scope -- the same references `-vtax` would
+  search, but with `-mcb` still enforced.
+- **`-vtax` accepts a family name** and routes it here, with a note on stderr.  Exact taxon match is
+  tried first, so `-vtax Hantaviridae` keeps its existing meaning.
+- Cannot be combined with `-vtax` or `-skip-classification`.
+
 ## Checking how confident a classification is, with -margin
 
 `-mcb` asks whether the best BLASTn hit is *strong enough*.  It does not ask whether it beat the
@@ -308,6 +379,7 @@ Note that it assumes your genome will have the same set of proteins as the neare
 
 ```
   "Arenaviridae": {
+    "family": "Arenaviridae",
     "segments": {
       "Small RNA Segment": {
         "max_len": 3741,
@@ -336,7 +408,7 @@ Note that it assumes your genome will have the same set of proteins as the neare
       ...
 ```
 
-The Viral_PSSM.json file is in a regular state of development, so this may change slightly, but the above shows an example for, *Arenaviridae*, and a single protein, GPC.  The two highest level keys are `segments`, which contains information on segments that are used for genome quality evaluation and `features`, which currently contains information on CDS, mat_peptide, and RNA features. <br>
+The Viral_PSSM.json file is in a regular state of development, so this may change slightly, but the above shows an example for, *Arenaviridae*, and a single protein, GPC.  The three highest level keys are `family`, the ICTV family the annotation taxon belongs to (which is what `-vfam` groups on -- every taxon must have one, and for the Bunyavirales, which are themselves families, it repeats the taxon name); `segments`, which contains information on segments that are used for genome quality evaluation; and `features`, which currently contains information on CDS, mat_peptide, and RNA features.  A fourth, `close_genomes`, maps each `Viral-Rep-Contigs/` filename to the BV-BRC genome it came from. <br>
 
 The following is a non-exhaustive description of fields that are used in the JSON<br><br>
 
