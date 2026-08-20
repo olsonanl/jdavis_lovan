@@ -120,11 +120,16 @@ if (scalar @to_analyze)
 	$genome_in->write_contigs_to_file($contigs);
 	
 	#make the blastn db in the temp dir.
-	my $make_db = run("makeblastdb -dbtype nucl -in $contigs >/dev/null");
+	# List form, so there is no shell to quote the contig path for; die rather than warn,
+	# because the loop below cannot do anything without the database and would fail on the
+	# unparseable (empty) blastn report instead, several steps from the actual cause.
+	my $make_db_err = "";
+	my $make_db = run(["makeblastdb", "-dbtype", "nucl", "-in", $contigs], ">", "/dev/null", "2>", \$make_db_err);
+	my $make_db_rc = $? >> 8;
 
 	if (!$make_db)
 	{
-		print STDERR "get_splice_variant_features:  makeblastdb failed with rc=$?. Stdout:\n";
+		die "get_splice_variant_features:  makeblastdb on $contigs failed with rc=$make_db_rc\n$make_db_err";
 	}
 	
 	# create the GTO analysis event.
@@ -148,11 +153,13 @@ if (scalar @to_analyze)
 		my $query = "$dir/$fam/$name.fasta"; 
 		run ("cp $query ."); 
 
-		my $make_db2 = run("makeblastdb -dbtype nucl -in $name.fasta >/dev/null");
+		my $make_db2_err = "";
+		my $make_db2 = run(["makeblastdb", "-dbtype", "nucl", "-in", "$name.fasta"], ">", "/dev/null", "2>", \$make_db2_err);
+		my $make_db2_rc = $? >> 8;
 
 			if (!$make_db2)
 			{
-				print STDERR "get_splice_variant_features:  makeblastdb failed with rc=$?. Stdout:\n";
+				die "get_splice_variant_features:  makeblastdb on $name.fasta failed with rc=$make_db2_rc\n$make_db2_err";
 			}
 
 			my @blast_parms = (
@@ -170,8 +177,13 @@ if (scalar @to_analyze)
 		      "-num_threads",    $opt->threads);
 		      
 
+		# The redirect creates $name.json whether or not blastn succeeded, so without this
+		# check a failed search reaches us as "malformed JSON string" on an empty file.
 		my $do_blast = run(["blastn", @blast_parms], ">", "$name.json", "2>", "$name.blastn.stderr.txt");
-		open (IN, "<$name.json") or warn "Cannot open JSON BLASTn output file $name.json\n";
+		my $blast_rc = $? >> 8;
+		$do_blast or die "get_splice_variant_features:  blastn for $name failed with rc=$blast_rc\n"
+		                 .(-s "$name.blastn.stderr.txt" ? scalar read_file("$name.blastn.stderr.txt") : "");
+		open (IN, "<$name.json") or die "Cannot open JSON BLASTn output file $name.json\n";
 		my $results = decode_json(scalar read_file(\*IN));	
 		close IN;
 		

@@ -112,11 +112,16 @@ if (scalar @to_analyze)
 	$genome_in->write_contigs_to_file($contigs);
 	
 	#make the blastn db in the temp dir.
-	my $make_db = run("makeblastdb -dbtype nucl -in $contigs >/dev/null");
+	# List form, so there is no shell to quote the contig path for; die rather than warn,
+	# because the loop below cannot do anything without the database and would fail on the
+	# unparseable (empty) blastn report instead, several steps from the actual cause.
+	my $make_db_err = "";
+	my $make_db = run(["makeblastdb", "-dbtype", "nucl", "-in", $contigs], ">", "/dev/null", "2>", \$make_db_err);
+	my $make_db_rc = $? >> 8;
 
 	if (!$make_db)
 	{
-  	 print STDERR "get_transcript_edited_features:  makeblastdb failed with rc=$?. Stdout:\n";
+  	 die "get_transcript_edited_features:  makeblastdb on $contigs failed with rc=$make_db_rc\n$make_db_err";
 	}
 	
 	# create the GTO analysis event.
@@ -158,7 +163,12 @@ if (scalar @to_analyze)
 		      "-qcov_hsp_perc",  $opt->lower_pcov,
 		      "-num_threads",    $opt->threads);
 
+		# The redirect creates $name.json whether or not blastn succeeded, so without this
+		# check a failed search reaches us as "malformed JSON string" on an empty file.
 		my $do_blast = run(["blastn", @blast_parms], ">", "$name.json", "2>", "$name.blastn.stderr.txt");
+		my $blast_rc = $? >> 8;
+		$do_blast or die "get_transcript_edited_features:  blastn for $name failed with rc=$blast_rc\n"
+		                 .(-s "$name.blastn.stderr.txt" ? scalar read_file("$name.blastn.stderr.txt") : "");
 
 
 		# got stuck on blast chunking queries >10MB.

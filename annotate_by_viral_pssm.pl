@@ -4,6 +4,7 @@ use strict;
 use JSON::XS;
 use File::Slurp;
 use Getopt::Long;
+use IPC::Run qw(run);
 use Cwd;
 use gjoseqlib;
 
@@ -41,6 +42,58 @@ sub bail
 	my($code, @msg) = @_;
 	print STDERR @msg;
 	exit($code);
+}
+
+#
+# Render the $? left behind by a child process.
+#
+sub child_status
+{
+	my($rc) = @_;
+	return "could not be run: $!" if $rc == -1;
+	return sprintf("was killed by signal %d", $rc & 127) if $rc & 127;
+	return sprintf("exited with status %d", $rc >> 8);
+}
+
+#
+# Run a BLAST program that writes a JSON report to stdout, and return the decoded report.
+#
+# These calls used to be piped 2-arg opens, which have two problems.  The first is the shell:
+# every argument was interpolated into one string, so a path containing a space or a shell
+# metacharacter was a bug waiting to happen, and the shell's own exit status masked the
+# program's.  $cmd is an arrayref and IPC::Run execs it directly, so there is no shell to
+# quote for.
+#
+# The second is that a piped open reports only that the fork succeeded.  The program's exit
+# status does not appear until close, whose return value every call site here discarded -- and
+# decode_json ran before the close, so a BLAST that died partway through its report surfaced as
+# "malformed JSON string", dying with whatever happened to be left in $!, and one that failed
+# after writing a valid but empty report surfaced as nothing at all, just a genome with no
+# features.  That second case is the dangerous one: indistinguishable from an honest exit 11,
+# which is precisely the outcome the exit codes exist to make trustworthy.
+#
+# $capture_stderr keeps the program's stderr out of ours and shows it only on failure, for the
+# calls that used to discard it.  Calls whose BLAST stderr has always flowed through to ours
+# leave it false, and IPC::Run passes the handle straight through.
+#
+sub blast_json
+{
+	my($what, $cmd, $capture_stderr) = @_;
+
+	my($report, $err) = ("", "");
+	my @redirect = (">", \$report);
+	push @redirect, ("2>", \$err) if $capture_stderr;
+
+	my $ok = eval { run($cmd, @redirect) };
+	bail(EXIT_INTERNAL, "Could not run $what: $@\tcommand: @$cmd\n") if $@;
+	unless ($ok)
+	{
+		bail(EXIT_INTERNAL, "$what ".child_status($?)."\n\tcommand: @$cmd\n$err");
+	}
+
+	my $json = eval { decode_json($report) };
+	bail(EXIT_INTERNAL, "$what produced unparseable JSON: $@\tcommand: @$cmd\n$err") if $@;
+	return $json;
 }
 
 my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta 
@@ -140,7 +193,8 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
 
  			0	features were called
  			1	usage or configuration error (bad flag, unknown taxon, unreadable JSON)
- 			2	internal error
+ 			2	internal error (includes a BLAST program that failed or returned
+ 			    unparseable output)
  			10	no reference contig scored above -mcb, so no taxon could be chosen
  			11	a taxon was chosen, but no PSSM cleared its bit_cutoff
  			12	input length outside -min/-max
@@ -384,7 +438,9 @@ my $s_file = $contig_file;
 $s_file =~ s/.+\///g; 
 
 chdir ($tmp);
-system "makeblastdb -dbtype nucl -in $s_file >/dev/null";
+my $mbdb_err = "";
+run(["makeblastdb", "-dbtype", "nucl", "-in", $s_file], ">", "/dev/null", "2>", \$mbdb_err)
+	or bail(EXIT_INTERNAL, "makeblastdb on $s_file ".child_status($?)."\n$mbdb_err");
 
 
 #   Select the correct species based on the contig blastN
@@ -442,9 +498,11 @@ foreach (@reps)
 	$virus =~ s/\..+//g; 
 	
 	my $rep_file = "$cdir/$rep";
-	open (IN, "blastn -query $rep_file -subject $s_file -evalue 0.5 -reward 2 -penalty -3 -word_size 11 -outfmt 15 -soft_masking false -num_threads $threads 2>/dev/null |") or die "Could not run blastn: $!"; 
-	my $blastn = decode_json(scalar read_file(\*IN));	
-	close IN;
+	my $blastn = blast_json("blastn of reference $rep against $s_file",
+	                        ["blastn", "-query", $rep_file, "-subject", $s_file,
+	                         "-evalue", 0.5, "-reward", 2, "-penalty", -3, "-word_size", 11,
+	                         "-outfmt", 15, "-soft_masking", "false", "-num_threads", $threads],
+	                        1);   # was 2>/dev/null: still silent unless it fails
 
 	my $match_bit = get_blastn_bit($blastn);  
 	unless ($match_bit < $best_contig_bit)
@@ -681,9 +739,11 @@ foreach (@pssm_dirs)  #Each PSSM dir contains one or more PSSMs for a given homo
 	{		
 		my $pssm_file = "$pdir/$virus.pssms/$pssmdir/$_";
 		my $name = $_;
-		open (IN, "tblastn -outfmt 15 -db $s_file -in_pssm $pssm_file -seg no -num_threads $threads |") or die "Could not run tblastn: $!";
-		my $pssm_blast = decode_json(scalar read_file(\*IN));		
-		close IN; 	
+		# stderr not captured here: this call has always let tblastn's warnings through to ours.
+		my $pssm_blast = blast_json("tblastn of PSSM $name against $s_file",
+		                            ["tblastn", "-outfmt", 15, "-db", $s_file,
+		                             "-in_pssm", $pssm_file, "-seg", "no",
+		                             "-num_threads", $threads]);
 		
 		my  ($results, $hsp_best_bit) = matching_tblastn_hsps_json($pssm_blast, $bit_cutoff, $cov_cutoff);
 		print STDERR "\t$name\t$hsp_best_bit\n"; 
