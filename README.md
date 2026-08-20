@@ -418,6 +418,77 @@ score   Morbillivirus   183.165 Morbillivirus.2.dna
 the sidecar and adds `margin`, `runner_up`, `runner_up_value` and `margin_below_threshold` to the
 `close_genomes` record, so the confidence of the call travels with the genome.
 
+## Exit status, and what the run records about itself
+
+Three different things can go wrong, and until recently they all looked the same from outside.
+`annotate_by_viral_pssm.pl` returned 1 both for "this genome cannot be placed" and for "you passed a
+bad flag"; it returned 0 for "a taxon was chosen but nothing scored"; and a bare `die` returned
+whatever `$!` happened to hold.  It now exits with a code that says which happened:
+
+| code | meaning |
+|---:|---|
+| 0 | features were called |
+| 1 | usage or configuration error -- bad flag, unknown taxon, unreadable JSON |
+| 2 | internal error |
+| 10 | no reference contig scored above `-mcb`, so no taxon could be chosen |
+| 11 | a taxon was chosen, but no PSSM cleared its `bit_cutoff` |
+| 12 | input length outside `-min`/`-max` |
+
+**10, 11 and 12 are not errors.** For a 200 bp fragment "nothing to annotate" is the right answer.
+What they mean for a caller is that there is nothing for the downstream stages to work on:
+`get_transcript_edited_features.pl`, `get_splice_variant_features.pl` and `viral_genome_quality.pl`
+all refuse to run on a GTO with no features, so a pipeline should stop after step 1 rather than run
+the rest and fail the job.  Codes are 10 and up so that none of them collides with a `$!`-derived
+status (`ENOENT` is 2).
+
+### The GTO wrapper
+
+`annotate_by_viral_pssm-GTO.pl` **still exits 0 by default**, whatever the base script returned, and
+still writes the output GTO.  `--propagate-exit-status` makes it exit with the base script's code
+instead.  It is opt-in because a caller that runs the annotation and the three downstream stages as
+a single shell pipeline fails the whole job on any non-zero stage -- which is precisely the
+behaviour that turns a legitimately empty annotation into a dead job.  Turn it on once the caller
+runs step 1 separately and decides what to do with the result.
+
+The same information is on the GTO either way, as the `LowVan Annotate` analysis event:
+
+```json
+{
+  "tool_name": "LowVan Annotate",
+  "tool_version": "dev",
+  "hostname": "lemon",
+  "success": 1,
+  "metadata": {
+    "status": "annotated",
+    "exit_code": "0",
+    "features_called": "13",
+    "features_CDS": "11",
+    "features_mat_peptide": "2",
+    "viral_taxon": "Alphainfluenzavirus",
+    "classification_scope": "blastn",
+    "closest_reference": "Alphainfluenzavirus.2.dna",
+    "closest_reference_bit": "3033.35",
+    "input_contigs": "8",
+    "input_bp": "13158"
+  }
+}
+```
+
+`success` is 1 if and only if **this run added features**.  That is deliberately neither of the two
+things it could be confused with: not "the process exited 0", because 11 is an orderly exit that
+annotated nothing, and not "the GTO has features", which is true of any GTO that arrived carrying
+GenBank features -- the reason the downstream `No features in GTO` guard has been such a misleading
+signal.
+
+`metadata` is a flat string-to-string map.  `status` is the exit code in words (`annotated`,
+`no_reference`, `no_features`, `out_of_bounds`, `usage_error`, `internal_error`, or `error` for
+anything unexpected).  `classification_scope` records *how* the taxon was arrived at -- `blastn`,
+`declared_taxon`, `declared_family` or `lineage_fallback` -- which cannot be recovered from the
+taxon name alone and is the first thing worth knowing about a questionable annotation.  Depending on
+the run it also carries `margin` / `runner_up` / `runner_up_bit`, `min_contig_bit`,
+`declared_family`, `classification_lineage_element`, `retried_with_declared_taxon`,
+`removed_existing_features`, and per-type feature counts.
+
 ## Step 1.  Calling features based on PSSMs
 
 The code is currently designed to work on the *Paramyxoviridae*, *Bunyavirales*, *Filoviridae*, and *Pneumoviridae*, although more taxa are planned.  As depicted in the image below, it first performs a BLASTn against a small set of representative genomes for each genus.  Then it sorts the results by bit score and chooses the best match.<br>

@@ -34,7 +34,8 @@ opposite order — annotate → **splice** → **transcript-editing** → qualit
 All three post-processing steps refuse to run on a GTO with no features (`No features in GTO`) or
 no `viral_family` field, and because the stages are piped, one death cascades to rc=255 across all
 of them. This is the single most common production failure mode — see
-`LOWVAN-FAILURE-ANALYSIS.md`.
+`LOWVAN-FAILURE-ANALYSIS.md`. Step 1 now says whether there is anything for them to work on, via
+its exit code and the analysis event's `success` field — see "Exit codes and the analysis event".
 
 ### Key options for annotate_by_viral_pssm.pl:
 - `-j` JSON options file (default: Viral_PSSM.json)
@@ -301,6 +302,45 @@ Implementation notes, each of which is a decision that could reasonably have gon
   classification was rejected. `close_genomes` gets `classification_scope = lineage_fallback`,
   `classification_taxon`, `classification_lineage`; `viral_family` falls back to the declared taxon
   (plain `-vtax` writes no sidecar, so the wrapper has to record this itself).
+
+## Exit codes and the analysis event
+
+`annotate_by_viral_pssm.pl` exits `0` / `1` (usage) / `2` (internal) / `10` (no reference above
+`-mcb`) / `11` (taxon chosen, no PSSM cleared `bit_cutoff`) / `12` (length outside `-min`/`-max`).
+Every `die` in the option-processing and data-loading path went through a `bail($code, @msg)`
+helper; a bare `die` is now reserved for a genuine bug, and its `$!`-derived status is why the
+meaningful codes start at 10 rather than 3. The table is in `-h`.
+
+- **10, 11 and 12 are outcomes, not errors** — the distinction the whole change exists for. They are
+  the three ways a genome legitimately produces no annotation, and therefore the three cases where
+  the downstream stages must be *skipped*, not run and failed.
+- `exit($count ? EXIT_OK : EXIT_NO_FEATURES)` at the end of the main flow is the only new exit in
+  the success path. `$count` is the feature counter in the output loop, so 11 is decided by what was
+  actually written, not by a re-scan.
+- **Adding a code is cheap; changing one is not.** `pipeline_run*.sh` and the p3x wrapper treat
+  non-zero as failure, so promoting a currently-silent condition to a new code changes their output
+  shape. Nothing currently distinguishes a BLAST crash from any other internal death.
+
+The GTO wrapper **still exits 0 by default** and always writes the GTO; `--propagate-exit-status`
+makes it return the base script's code. Off by default because `p3x-annotate-lowvan.pl` runs all
+four stages as one `IPC::Run` pipeline and fails the job on any non-zero stage — turning it on
+before that is restructured would kill exactly the 153 `-vfam` jobs the sidecar work rescued, all of
+which exit 0 today with zero LowVan features. The flag is the mechanism; the p3x change is the
+prerequisite.
+
+`classification_rejected()` now tests `rc == 10`, and keeps the two-string stderr match **only for
+`rc == 1`** — the P3 environment ships a deployed base script predating the codes, so the wrapper
+has to work against both. Drop the shim only when no such base script is reachable.
+
+The `LowVan Annotate` analysis event carries `hostname`, `success` and `metadata` (a flat
+string→string map; everything is stringified on the way in). **`success` is 1 iff this run added
+features** — deliberately not "rc was 0" (11 is an orderly exit that annotated nothing) and not "the
+GTO has features" (true of any GTO carrying GenBank features, which is what makes guard 1 such a
+misleading signal). `metadata.status` is the code in words; `metadata.classification_scope` is
+`blastn` / `declared_taxon` / `declared_family` / `lineage_fallback`, which is not recoverable from
+the taxon name. The event is added *before* the feature loop because features reference its id, and
+`add_analysis_event` stores the hashref rather than a copy — that is what lets `success` and
+`metadata` be filled in afterwards.
 
 ## Margin scoring (`-margin`)
 
