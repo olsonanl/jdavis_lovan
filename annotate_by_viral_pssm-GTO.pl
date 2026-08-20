@@ -40,6 +40,7 @@ my($opt, $usage) = describe_options("%c %o",
 				    ["list-viral-taxa" => "List the valid --viral-taxon values and exit"],
 				    ["viral-family=s"  => "Declare the annotation family when the genus is not known, and let BLASTn choose the genus within it. For records whose lineage stops at family. Unlike --viral-taxon this still makes a call, so -mcb applies and a genome that clears nothing is still rejected. See --list-viral-families. Cannot be combined with --viral-taxon or --skip-classification"],
 				    ["list-viral-families" => "List the valid --viral-family values and exit"],
+				    ["fallback-viral-taxon" => "If the BLASTn classification finds no reference above -mcb, retry once with --viral-taxon derived from the lineage in the input GTO's own \"taxonomy\" field. BLASTn still gets first refusal, so a genome it can place is annotated exactly as it is today; the declared taxon is used only where there would otherwise be no annotation at all. Does nothing if the GTO has no lineage, or if the lineage resolves no deeper than a rank LowVan has no taxon for"],
 				    ["skip-classification" => "With --viral-taxon, BLASTn only that taxon reference contigs (1-14) instead of every reference contig. Much faster, but no cross-check against the other taxa, so a wrong --viral-taxon will not be caught. For bulk reruns where the taxon is already known to be correct"],
 				    ["margin=f"        => "Minimum ratio between the winning and runner-up taxon bit scores, e.g. --margin 1.3. Off by default. Warns when the classification is a near-tie and records the margin on the GTO close_genomes record; never rejects. Incompatible with --skip-classification, which searches one taxon only"],
 				    ["version|v"       => "Show version information"],
@@ -65,6 +66,16 @@ if ($opt->list_viral_families) {
 }
 
 die($usage->text) if @ARGV != 0;
+
+# --viral-taxon already declares the answer, and the base script downgrades the -mcb
+# rejection to a warning under it, so there is no classification failure to fall back
+# from.  --viral-family is allowed: it CAN fail -mcb, and if the lineage turns out to
+# carry a genus after all, retrying with that genus is strictly better than giving up.
+if ($opt->fallback_viral_taxon && $opt->viral_taxon)
+{
+    die "--fallback-viral-taxon and --viral-taxon cannot be combined: the taxon is already declared,\n"
+      . "and under --viral-taxon a low -mcb is a warning rather than a failure, so nothing would trigger.\n";
+}
 
 chomp(my $hostname = `hostname`);
 
@@ -121,6 +132,55 @@ push @params, ("-margin", $opt->margin)            if $opt->margin;
 print STDERR Dumper(\@params);
 my $ok = run(["annotate_by_viral_pssm.pl", @params], ">", "$here/$prefix.stdout.txt", "2>", "$here/$prefix.stderr.txt");
 
+# --- fallback: BLASTn could not place the genome, so declare the taxon ourselves ------
+#
+# Order matters and is the point of the option: BLASTn gets first refusal, so any genome
+# it can place is annotated exactly as it is without the flag.  The lineage is consulted
+# only for genomes that would otherwise produce no annotation at all.
+#
+# The trigger is the stderr text, not the exit code.  The wrapper's own note above
+# explains why: a BLAST crash and the base script's graceful "no reference match" exit(1)
+# are indistinguishable by rc, and retrying a crash with a declared taxon would just crash
+# again with a misleading provenance record attached.
+my ($fallback_taxon, $fallback_rank);
+if ($opt->fallback_viral_taxon && !$ok && classification_rejected("$here/$prefix.stderr.txt"))
+{
+    my @valid = valid_viral_taxa($opt->pdir, $opt->json);
+    ($fallback_taxon, $fallback_rank) = taxon_from_lineage($genome_in, \@valid);
+
+    if (!defined $fallback_taxon)
+    {
+        my $lin = $genome_in->{taxonomy};
+        print STDERR "--fallback-viral-taxon: classification found no reference above the cutoff, but "
+                   . (defined $lin && $lin ne ""
+                        ? "no element of the GTO lineage is a LowVan annotation taxon.\n\tlineage: $lin\n"
+                        : "the input GTO has no \"taxonomy\" field to fall back to.\n");
+    }
+    else
+    {
+        print STDERR "--fallback-viral-taxon: classification found no reference above the cutoff; "
+                   . "retrying with -vtax $fallback_taxon (from GTO lineage element '$fallback_rank').\n";
+
+        # Drop -vfam if it was given: we now have a genus, which is strictly more specific
+        # than the family scope, and the two cannot be passed together.
+        my @retry;
+        for (my $i = 0; $i <= $#params; $i++)
+        {
+            if ($params[$i] eq "-vfam") { $i++; next }
+            push @retry, $params[$i];
+        }
+        push @retry, ("-vtax", $fallback_taxon);
+        @params = @retry;
+
+        # Keep the BLASTn attempt's stderr; the retry would otherwise overwrite the only
+        # record of why the classification was rejected.
+        move("$here/$prefix.stderr.txt", "$here/$prefix.stderr-classification.txt");
+
+        print STDERR Dumper(\@params);
+        $ok = run(["annotate_by_viral_pssm.pl", @params],
+                  ">", "$here/$prefix.stdout.txt", "2>", "$here/$prefix.stderr.txt");
+    }
+}
 
 if (!$ok)
 {
@@ -267,6 +327,18 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 				$close->{classification_family} = $cls->{family} if defined $cls->{family};
 			}
 		}
+
+		# --fallback-viral-taxon: this genome was NOT placed by BLASTn -- the taxon came
+		# from its own lineage after the classification was rejected.  Say so, and say
+		# which lineage element it came from: the closeness_value below is then the best
+		# reference *within* the declared taxon, not the score that chose it.
+		if (defined $fallback_taxon)
+		{
+			$close->{classification_scope}   = "lineage_fallback";
+			$close->{classification_taxon}   = $fallback_taxon;
+			$close->{classification_lineage} = $fallback_rank;
+		}
+
 		push(@{$genome_in->{close_genomes}}, $close);
 	}
 
@@ -277,9 +349,13 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 	# the base script -- so take it from the sidecar, which -vfam always writes.  Without
 	# this an empty annotation under --viral-family reintroduces exactly the guard-2 death
 	# that declaring a taxon exists to prevent.
+	# --fallback-viral-taxon lands in the same hole as --viral-taxon and for the same
+	# reason: the retry may call zero features, and then nothing else here knows what the
+	# genome was annotated as.  $fallback_taxon is what -vtax was given on the retry.
 	$genome_in->{viral_family} = $viral_family
 	                          // ($cls ? $cls->{annotated_as} : undef)
-	                          // $opt->viral_taxon;
+	                          // $opt->viral_taxon
+	                          // $fallback_taxon;
 }
 else
 {
@@ -318,6 +394,106 @@ sub read_classification
 	$cls{below_threshold} += 0   if defined $cls{below_threshold};
 	delete $cls{runner_up} if defined $cls{runner_up} && $cls{runner_up} eq "-";
 	return \%cls;
+}
+
+#
+# --fallback-viral-taxon support.
+#
+
+#
+# Did the base script reject the classification, as opposed to falling over?
+#
+# We match on the text rather than the exit code deliberately.  The base script exits 1
+# both when no reference clears -mcb and when BLAST itself dies, and retrying a crash with
+# a declared taxon would just crash again while attaching a provenance record claiming the
+# taxon came from the lineage on purpose.  These two strings are the only two places the
+# base script prints a cutoff rejection (unrestricted, and under -vfam); keep them in step
+# with annotate_by_viral_pssm.pl if that wording ever changes.
+#
+sub classification_rejected
+{
+	my($file) = @_;
+	return 0 unless -s $file;
+	open(my $fh, "<", $file) or return 0;
+	my $hit = 0;
+	while (<$fh>)
+	{
+		if (/No matching reference contigs/ || /No reference contig of family/)
+		{
+			$hit = 1;
+			last;
+		}
+	}
+	close $fh;
+	return $hit;
+}
+
+#
+# The 34 annotation taxa, asked of the base script rather than re-derived here.
+#
+# -list-vtax reads the same $pdir/$json this run is using, so a data directory with a
+# different taxon set answers for itself.  Returns the empty list on any failure; the
+# caller then simply does not fall back, which is the same outcome as an unmatchable
+# lineage and is the safe direction to fail in.
+#
+sub valid_viral_taxa
+{
+	my($pdir, $json) = @_;
+	my $out = "";
+	my $ok = run(["annotate_by_viral_pssm.pl", "-list-vtax", "-pssm", $pdir, "-j", $json],
+		     ">", \$out, "2>", \my $err);
+	if (!$ok)
+	{
+		warn "--fallback-viral-taxon: could not list the valid taxa (rc=$?); not falling back.\n$err";
+		return ();
+	}
+	return grep { length } map { my $t = $_; $t =~ s/^\s+|\s+$//g; $t } split /\n/, $out;
+}
+
+#
+# Walk the GTO's own lineage and return the most specific element that is an annotation
+# taxon, as ($taxon, $lineage_element_it_came_from).
+#
+# Most-specific-first, because the lineage runs general -> specific and the deepest match is
+# the most informative: an Orthopneumovirus muris record must land on the species taxon and
+# not stop at the genus one rank above it.
+#
+# Matching is exact string, never prefix or substring.  "Orthopneumovirus" is a strict
+# prefix of "Orthopneumovirus_muris", so a prefix match would silently mis-assign one of
+# them.  The only normalization is space -> underscore, which is how that one binomial taxon
+# is spelled on disk.
+#
+# A Bunyavirales lineage ("... ; Hantaviridae; Orthohantavirus; Orthohantavirus xyz") simply
+# finds no match at genus or species and lands on the family, which is the rank LowVan
+# annotates that order at.  A lineage that stops above any annotation taxon returns nothing
+# and the caller reports it -- that is the genus-less population, for which --viral-family
+# is the tool, not this one.
+#
+sub taxon_from_lineage
+{
+	my($gto, $valid) = @_;
+	my %valid = map { $_ => 1 } @$valid;
+	return (undef, undef) unless %valid;
+
+	my @lineage;
+	my $tax = $gto->{taxonomy};
+	if (ref($tax) eq 'ARRAY')          { @lineage = @$tax }
+	elsif (defined $tax && $tax ne "") { @lineage = split /;/, $tax }
+	elsif (ref($gto->{ncbi_lineage}) eq 'ARRAY')
+	{
+		# The structured form some GTOs carry instead: [[name, taxid, rank], ...].
+		@lineage = map { ref($_) eq 'ARRAY' ? $_->[0] : $_ } @{$gto->{ncbi_lineage}};
+	}
+
+	for my $elt (reverse @lineage)
+	{
+		next unless defined $elt;
+		(my $name = $elt) =~ s/^\s+|\s+$//g;
+		next if $name eq "";
+		(my $t = $name) =~ s/\s+/_/g;
+		return ($t, $name) if $valid{$t};
+	}
+	return (undef, undef);
 }
 
 

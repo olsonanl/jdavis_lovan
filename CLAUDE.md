@@ -267,6 +267,41 @@ Implementation notes:
 - The GTO wrapper gained `--min-contig-bit` (passed through as `-mcb`) at the same time; it had
   never surfaced the contig-bitscore gate, which made `--viral-family` useless from that path.
 
+## Lineage fallback (`--fallback-viral-taxon`, GTO wrapper only)
+
+`-vtax` and `-vfam` both decide up front, for the whole run, whether to trust BLASTn.
+`--fallback-viral-taxon` decides per genome and only after the fact: run the normal classification,
+and if it finds no reference above `-mcb`, retry once with `-vtax` derived from the lineage in the
+**input GTO's own `taxonomy` field**. BLASTn keeps first refusal, so a genome it can place is
+annotated byte-identically to a run without the flag. Off by default; the regression on
+`A-California-07-2009-H1N1.gto` is identical apart from per-run timestamps and event UUIDs.
+
+Implementation notes, each of which is a decision that could reasonably have gone the other way:
+
+- **The trigger is the stderr text, not the exit code** — `classification_rejected()` matches the two
+  strings the base script prints (`No matching reference contigs`, `No reference contig of family`).
+  rc cannot tell a graceful rejection from a BLAST crash, and retrying a crash under a declared taxon
+  would crash again with a provenance record claiming the taxon was chosen on purpose. Keep those two
+  strings in step with `annotate_by_viral_pssm.pl` if the wording ever changes.
+- **The valid taxa are asked of the base script** (`-list-vtax -pssm … -j …`), not re-derived, so a
+  `LOWVAN_DATA_DIR` with a different taxon set answers for itself. Any failure returns the empty list
+  and the wrapper simply does not fall back — the safe direction.
+- **The lineage is walked most-specific-first, exact-string, spaces → underscores.** All three
+  matter: `Orthopneumovirus` is a strict prefix of `Orthopneumovirus_muris` (so no prefix matching),
+  the binomial is the only taxon with a space, and a Bunyavirales lineage must fall *past* genus and
+  species to land on the family. Tested against all four cases plus a lineage stopping at family.
+- **Refused with `--viral-taxon`** (nothing to fall back from; `-mcb` is only a warning there),
+  **allowed with `--viral-family`** — that one can still fail `-mcb`, and the retry drops `-vfam`
+  because a genus is strictly more specific than a family scope.
+- `-vfam` is deliberately *not* used as the fallback: restriction can only lower the best bit score,
+  so it cannot rescue a genome that already failed `-mcb` unrestricted.
+- The retry reassigns `@params` before the analysis event is built, so the event records the
+  invocation that produced the output. The first attempt's stderr is moved to
+  `<prefix>.stderr-classification.txt` — the retry would otherwise destroy the only record of why the
+  classification was rejected. `close_genomes` gets `classification_scope = lineage_fallback`,
+  `classification_taxon`, `classification_lineage`; `viral_family` falls back to the declared taxon
+  (plain `-vtax` writes no sidecar, so the wrapper has to record this itself).
+
 ## Margin scoring (`-margin`)
 
 `-mcb` asks whether the best hit is strong enough; `-margin` asks whether it beat the runner-up.

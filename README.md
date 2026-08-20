@@ -311,6 +311,53 @@ Other behaviour:
   tried first, so `-vtax Hantaviridae` keeps its existing meaning.
 - Cannot be combined with `-vtax` or `-skip-classification`.
 
+## Falling back to the GTO's own lineage with --fallback-viral-taxon
+
+`-vtax` and `-vfam` both make you choose up front, for every genome, whether to trust BLASTn or to
+override it.  `--fallback-viral-taxon` (GTO wrapper only) does not choose: it runs the normal
+classification, and only if that finds no reference above `-mcb` does it retry once with `-vtax`
+taken from the lineage already in the input GTO.
+
+```
+annotate_by_viral_pssm-GTO.pl -i in.gto -o out.gto --fallback-viral-taxon
+```
+
+```
+No matching reference contigs with bit score greater than 150
+--fallback-viral-taxon: classification found no reference above the cutoff; retrying with
+-vtax Alphainfluenzavirus (from GTO lineage element 'Alphainfluenzavirus').
+```
+
+BLASTn gets first refusal, so a genome it can place is annotated exactly as it is without the flag
+-- this is not an override.  The lineage is consulted only for genomes that would otherwise produce
+no annotation at all, which in the failure-set rerun was the single largest recoverable bucket.
+
+Details:
+
+- **The lineage comes from the GTO's own `taxonomy` field**, not from any GenBank record it was
+  built from.  Note that `rast-create-genome --from-genbank` does *not* populate `taxonomy` -- it
+  writes only `ncbi_taxonomy_id` and `scientific_name` -- so a GTO built that way has nothing to
+  fall back to and the flag will say so and do nothing.  (`ncbi_lineage`, if present, is read as an
+  alternative.)
+- The lineage is walked **most specific first**, so an `Orthopneumovirus muris` record lands on the
+  species taxon rather than stopping at the genus one rank above it.  Matching is exact-string with
+  spaces mapped to underscores; a Bunyavirales lineage finds nothing at species or genus and
+  correctly lands on the family.
+- A lineage that resolves no deeper than a rank LowVan has no taxon for -- the genus-less 7.2% --
+  prints a note naming the lineage and does not retry.  `--viral-family` is the tool for those.
+- **The trigger is the rejection message, not the exit code.**  The base script exits 1 both when it
+  rejects the classification and when BLAST itself dies, and retrying a crash with a declared taxon
+  would just crash again while claiming the taxon was chosen deliberately.
+- Cannot be combined with `--viral-taxon`: the taxon is already declared, and under `--viral-taxon`
+  a low `-mcb` is a warning rather than a failure, so nothing would ever trigger.  It *can* be
+  combined with `--viral-family`, which can still fail `-mcb`; the retry drops `-vfam`, since a
+  genus from the lineage is strictly more specific than a family scope.
+- On the retry the GTO records where the taxon came from: `classification_scope`
+  (`lineage_fallback`), `classification_taxon` and `classification_lineage` on the `close_genomes`
+  record, `-vtax` in the analysis event's parameters, and `viral_family` set from the declared taxon
+  so the downstream steps run even if no features were called.  The first attempt's stderr is kept
+  as `<prefix>.stderr-classification.txt` rather than being overwritten by the retry.
+
 ## Checking how confident a classification is, with -margin
 
 `-mcb` asks whether the best BLASTn hit is *strong enough*.  It does not ask whether it beat the
