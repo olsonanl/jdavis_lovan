@@ -234,6 +234,10 @@ job — see the evidence above and `failure-analysis/margin-scoring.md`.
 scripts and raw results:
 
 - `../LOWVAN-FAILURE-ANALYSIS.md` — root cause, the failure buckets, and the recovery plan
+- `rerun-5000-analysis.md` — **the full analysis of the 5,000-genome rerun**: sample design and
+  weights, per-taxon breakdowns, both failure buckets in full, the ten misclassifications, threats
+  to validity, operational findings, and the column format of every `results-5000-*.tsv`. Start here
+  before cutting a new slice from the raw results
 - `classification-failure-mechanism.md` — why the BLASTn step picks the wrong genus
 - `margin-scoring.md` — using the winner/runner-up bit-score ratio to tell a real call from a tie
 - `proposed-reference-genomes.md` — specific references to add, with expected impact (Tiers 1 and 2
