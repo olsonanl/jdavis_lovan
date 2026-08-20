@@ -21,6 +21,34 @@ if ($@ || !$tool_version) {
 
 my $default_data_dir = $ENV{LOWVAN_DATA_DIR} // "/home/jjdavis/bin/Viral_Annotation";
 
+#
+# The base script's exit codes, mirrored here so this wrapper can read a result instead of
+# grepping English out of stderr.  Keep in step with annotate_by_viral_pssm.pl, which is
+# where they are defined and documented.
+#
+# 10 and up are the "nothing was annotated" outcomes.  All three are legitimate results for
+# a short or divergent fragment rather than errors, which is exactly the distinction the
+# caller needs: the downstream stages all die on a GTO with no features, so a pipeline
+# should skip them for 10/11/12 rather than fail the job.
+#
+use constant EXIT_OK            => 0;
+use constant EXIT_USAGE         => 1;
+use constant EXIT_INTERNAL      => 2;
+use constant EXIT_NO_REFERENCE  => 10;
+use constant EXIT_NO_FEATURES   => 11;
+use constant EXIT_OUT_OF_BOUNDS => 12;
+
+# rc -> the metadata "status" string recorded on the analysis event.  Anything not listed
+# (an uncaught die, 255, a signal) is reported as "error": unexpected, not a known outcome.
+my %STATUS_FOR_RC = (
+    EXIT_OK()            => "annotated",
+    EXIT_USAGE()         => "usage_error",
+    EXIT_INTERNAL()      => "internal_error",
+    EXIT_NO_REFERENCE()  => "no_reference",
+    EXIT_NO_FEATURES()   => "no_features",
+    EXIT_OUT_OF_BOUNDS() => "out_of_bounds",
+);
+
 my($opt, $usage) = describe_options("%c %o",
 				    ["input|i=s"       => "Input file"],
 				    ["output|o=s"      => "Output file"],
@@ -43,6 +71,7 @@ my($opt, $usage) = describe_options("%c %o",
 				    ["fallback-viral-taxon" => "If the BLASTn classification finds no reference above -mcb, retry once with --viral-taxon derived from the lineage in the input GTO's own \"taxonomy\" field. BLASTn still gets first refusal, so a genome it can place is annotated exactly as it is today; the declared taxon is used only where there would otherwise be no annotation at all. Does nothing if the GTO has no lineage, or if the lineage resolves no deeper than a rank LowVan has no taxon for"],
 				    ["skip-classification" => "With --viral-taxon, BLASTn only that taxon reference contigs (1-14) instead of every reference contig. Much faster, but no cross-check against the other taxa, so a wrong --viral-taxon will not be caught. For bulk reruns where the taxon is already known to be correct"],
 				    ["margin=f"        => "Minimum ratio between the winning and runner-up taxon bit scores, e.g. --margin 1.3. Off by default. Warns when the classification is a near-tie and records the margin on the GTO close_genomes record; never rejects. Incompatible with --skip-classification, which searches one taxon only"],
+				    ["propagate-exit-status" => "Exit with the base script's status (10 = no reference above -mcb, 11 = no feature cleared its bit_cutoff, 12 = length out of bounds) instead of always exiting 0. The output GTO is still written either way. Off by default because a caller that runs the annotation and the downstream stages as one pipeline would fail the whole job on a legitimately empty annotation; turn it on once the caller decides per stage. The same information is always on the analysis event, as success and metadata.status"],
 				    ["version|v"       => "Show version information"],
 				    ["help|h"          => "Show this help message"]);
 
@@ -131,6 +160,9 @@ push @params, ("-margin", $opt->margin)            if $opt->margin;
 
 print STDERR Dumper(\@params);
 my $ok = run(["annotate_by_viral_pssm.pl", @params], ">", "$here/$prefix.stdout.txt", "2>", "$here/$prefix.stderr.txt");
+# Capture immediately: $? is clobbered by the next system()/backtick/run().
+my $rc = $? >> 8;
+my $retried = 0;
 
 # --- fallback: BLASTn could not place the genome, so declare the taxon ourselves ------
 #
@@ -138,12 +170,12 @@ my $ok = run(["annotate_by_viral_pssm.pl", @params], ">", "$here/$prefix.stdout.
 # it can place is annotated exactly as it is without the flag.  The lineage is consulted
 # only for genomes that would otherwise produce no annotation at all.
 #
-# The trigger is the stderr text, not the exit code.  The wrapper's own note above
-# explains why: a BLAST crash and the base script's graceful "no reference match" exit(1)
-# are indistinguishable by rc, and retrying a crash with a declared taxon would just crash
-# again with a misleading provenance record attached.
+# The trigger is a *rejection*, not merely a failure: retrying a BLAST crash under a
+# declared taxon would just crash again while attaching a provenance record claiming the
+# taxon was chosen on purpose.  rc = EXIT_NO_REFERENCE now says so directly; the stderr
+# match is kept as a fallback for a deployed base script predating the exit codes.
 my ($fallback_taxon, $fallback_rank);
-if ($opt->fallback_viral_taxon && !$ok && classification_rejected("$here/$prefix.stderr.txt"))
+if ($opt->fallback_viral_taxon && !$ok && classification_rejected($rc, "$here/$prefix.stderr.txt"))
 {
     my @valid = valid_viral_taxa($opt->pdir, $opt->json);
     ($fallback_taxon, $fallback_rank) = taxon_from_lineage($genome_in, \@valid);
@@ -179,32 +211,56 @@ if ($opt->fallback_viral_taxon && !$ok && classification_rejected("$here/$prefix
         print STDERR Dumper(\@params);
         $ok = run(["annotate_by_viral_pssm.pl", @params],
                   ">", "$here/$prefix.stdout.txt", "2>", "$here/$prefix.stderr.txt");
+        $rc = $? >> 8;
+        $retried = 1;
     }
 }
 
+my $status = $STATUS_FOR_RC{$rc} // "error";
+
 if (!$ok)
 {
-    print STDERR "Viral Annotation run failed with rc=$?. Stderr:\n";
+    print STDERR "Viral Annotation run failed with rc=$rc ($status). Stderr:\n";
     copy("$here/$prefix.stderr.txt", \*STDERR);   # was hardcoded Viral_Anno.stderr.txt + mislabeled "Stdout" (gist #17)
-    # NOTE: execution continues below and still writes an output GTO. See caveat in the porting notes --
-    # a genuine BLAST crash and the base script's graceful "no reference match" exit(1) are
-    # indistinguishable by return code, so we do not hard-abort here.
-    # (Exception: under --viral-taxon the base script warns instead of exiting on a low -mcb,
-    # so a non-zero rc there is unambiguously a real failure.  --viral-family does NOT get
-    # that exception -- it still has to choose a genus, so a low -mcb exits 1 there as it
-    # does with no declaration at all.)
+    # Execution continues below and still writes an output GTO -- rc 10/11/12 are legitimate
+    # "nothing to annotate" outcomes, not errors, and the GTO the caller gets back is the
+    # input plus an analysis event saying so.  Whether that becomes a non-zero exit for the
+    # caller is --propagate-exit-status, decided at the bottom of the script.
 }
 
 
-    
+
 my $event = {
     tool_name => "LowVan Annotate",
     tool_version => $tool_version,
     execution_time => scalar gettimeofday,
     parameters => \@params,
+    hostname => $hostname,
 };
 
+# The event is added before the features are parsed because each feature has to reference
+# its id.  add_analysis_event stores the hashref we hand it rather than a copy, so success
+# and metadata are filled in below, once there is something to report, and the change is
+# reflected in the GTO that gets written.
 my $event_id = $genome_in->add_analysis_event($event);
+
+my %meta = (
+    status    => $status,
+    exit_code => $rc,
+);
+$meta{retried_with_declared_taxon} = 1 if $retried;
+$meta{min_contig_bit} = $opt->min_contig_bit if defined $opt->min_contig_bit;
+$meta{margin_threshold} = $opt->margin if $opt->margin;
+
+# The -min/-max gate excluded 94.1% of the reannotation failure set, so when the answer is
+# out_of_bounds the length is the whole explanation and is worth having on the record.
+if (ref($genome_in->{contigs}) eq 'ARRAY')
+{
+    my $bp = 0;
+    $bp += length($_->{dna} // "") foreach @{$genome_in->{contigs}};
+    $meta{input_contigs} = scalar @{$genome_in->{contigs}};
+    $meta{input_bp}      = $bp;
+}
 
 
 ## Parse the generated peptide file. We collect the CDS, mature_peptides, and RNAs then
@@ -212,6 +268,7 @@ my $event_id = $genome_in->add_analysis_event($event);
 ##
 
 my $viral_family;
+my $features_added = 0;
 
 my ($close_bit, $close_id, $close_name, $close_file);
 if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
@@ -263,6 +320,7 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 		my @to_del = $genome_in->fids_of_type('CDS', 'mat_peptide', 'RNA');
 		print STDERR "Delete @to_del\n";
 		$genome_in->delete_feature($_) foreach @to_del;
+		$meta{removed_existing_features} = scalar @to_del;
     }
 
     
@@ -291,7 +349,9 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 				$p->{-alias_pairs} = [[gene => $feature->{symbol}]];
    			}
 			$genome_in->add_feature($p);
+			$features_added++;
 		}
+		$meta{"features_$type"} = $n;
     }
 
 	#add close genome:
@@ -340,7 +400,25 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 		}
 
 		push(@{$genome_in->{close_genomes}}, $close);
+
+		$meta{closest_reference}      = $close_file if defined $close_file;
+		$meta{closest_reference_bit}  = $close_bit  if defined $close_bit;
+		$meta{runner_up}              = $close->{runner_up}       if defined $close->{runner_up};
+		$meta{runner_up_bit}          = $close->{runner_up_value}  if defined $close->{runner_up_value};
+		$meta{margin}                 = $close->{margin}          if defined $close->{margin};
+		$meta{margin_below_threshold} = $close->{margin_below_threshold}
+			if defined $close->{margin_below_threshold};
 	}
+
+	# How the taxon was arrived at, which is not recoverable from the taxon name alone and
+	# is the first thing anyone reviewing a questionable annotation wants to know.
+	$meta{classification_scope} = $opt->viral_taxon    ? "declared_taxon"
+	                            : defined $fallback_taxon ? "lineage_fallback"
+	                            : $opt->viral_family   ? "declared_family"
+	                            :                        "blastn";
+	$meta{classification_lineage_element} = $fallback_rank if defined $fallback_rank;
+	$meta{declared_family} = $opt->viral_family if $opt->viral_family;
+	$meta{skip_classification} = 1 if $opt->skip_classification;
 
 	# Fall back to the declared taxon: without this, a --viral-taxon run that calls zero
 	# features leaves viral_family undef and every downstream step dies on its "$fam or die".
@@ -360,9 +438,29 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 else
 {
     warn "Could not read $here/$prefix.stdout.txt\n";
+    $meta{status} = $status = "error" if $status eq "annotated";
+    $meta{feature_table_unreadable} = 1;
 }
 
+# "Success" is the question the caller actually has: did this run produce an annotation?
+# Not "did the process exit 0" -- rc 11 is an orderly exit that annotated nothing -- and not
+# "does the GTO have features", which is true of any GTO that arrived carrying GenBank
+# features and is what made the downstream guard so misleading.
+$event->{success}  = $features_added ? 1 : 0;
+$meta{features_called} = $features_added;
+$meta{viral_taxon} = $genome_in->{viral_family} if defined $genome_in->{viral_family};
+
+# mapping<string, string>: stringify, so a consumer never has to care whether a count
+# arrived as a number or a string, and JSON round-trips identically either way.
+$event->{metadata} = { map { $_ => "$meta{$_}" } grep { defined $meta{$_} } keys %meta };
+
 $genome_in->destroy_to_file($opt->output);
+
+# Default off: a caller that runs this and the downstream stages as one shell pipeline
+# fails the whole job on any non-zero stage, and rc 11 -- annotated nothing -- is common
+# and legitimate.  With the stages run separately the status is what tells the caller to
+# stop after this one, which is the point.
+exit($opt->propagate_exit_status ? $rc : 0);
 
 #
 # Read the <prefix>.classification sidecar written by annotate_by_viral_pssm.pl -margin.
@@ -403,16 +501,22 @@ sub read_classification
 #
 # Did the base script reject the classification, as opposed to falling over?
 #
-# We match on the text rather than the exit code deliberately.  The base script exits 1
-# both when no reference clears -mcb and when BLAST itself dies, and retrying a crash with
-# a declared taxon would just crash again while attaching a provenance record claiming the
-# taxon came from the lineage on purpose.  These two strings are the only two places the
-# base script prints a cutoff rejection (unrestricted, and under -vfam); keep them in step
-# with annotate_by_viral_pssm.pl if that wording ever changes.
+# The distinction is the whole gate: retrying a BLAST crash with a declared taxon would
+# crash again and then attach a provenance record claiming the taxon came from the lineage
+# on purpose.  EXIT_NO_REFERENCE answers this directly.
+#
+# The stderr match is a compatibility shim, and only for rc == 1.  Before the exit codes the
+# base script exited 1 for both a rejection and a crash, so text was the only signal -- and
+# the P3 environment ships a deployed annotate_by_viral_pssm.pl that can be older than this
+# wrapper.  These two strings are the only two places that script prints a cutoff rejection
+# (unrestricted, and under -vfam); keep them in step if the wording ever changes.  Once no
+# pre-exit-code base script is reachable this can drop to the rc test alone.
 #
 sub classification_rejected
 {
-	my($file) = @_;
+	my($rc, $file) = @_;
+	return 1 if $rc == EXIT_NO_REFERENCE;
+	return 0 unless $rc == EXIT_USAGE;
 	return 0 unless -s $file;
 	open(my $fh, "<", $file) or return 0;
 	my $hit = 0;
@@ -444,7 +548,7 @@ sub valid_viral_taxa
 		     ">", \$out, "2>", \my $err);
 	if (!$ok)
 	{
-		warn "--fallback-viral-taxon: could not list the valid taxa (rc=$?); not falling back.\n$err";
+		warn "--fallback-viral-taxon: could not list the valid taxa (rc=" . ($? >> 8) . "); not falling back.\n$err";
 		return ();
 	}
 	return grep { length } map { my $t = $_; $t =~ s/^\s+|\s+$//g; $t } split /\n/, $out;

@@ -9,6 +9,40 @@ use gjoseqlib;
 
 my $default_data_dir = $ENV{LOWVAN_DATA_DIR} // "/home/jjdavis/bin/Viral_Annotation";
 
+#
+# Exit codes.
+#
+# Before these existed the script returned 1 for both "this genome cannot be placed" and
+# "you passed a bad flag", and 0 for "classified, but nothing scored" -- so a caller could
+# not tell a legitimate empty result from a misuse or a crash, and the GTO wrapper had to
+# grep stderr for two English sentences to find out.  These give the caller the answer
+# directly.
+#
+# The two "nothing to annotate" codes are the point: both are legitimate outcomes for a
+# 200 bp fragment, not errors, and a caller that runs the downstream stages should skip
+# them rather than fail the job.
+#
+# 10 and up rather than 3 and up because Perl's `die` exits with $! when $! happens to be
+# set, which reaches the low single digits routinely (ENOENT is 2).  Anything outside this
+# table -- an uncaught die, 255, a signal at 128+n -- is an unexpected failure.
+#
+use constant EXIT_OK            => 0;    # features called
+use constant EXIT_USAGE         => 1;    # bad flags, unknown taxon, unreadable config
+use constant EXIT_INTERNAL      => 2;    # the script itself broke
+use constant EXIT_NO_REFERENCE  => 10;   # no reference contig scored above -mcb
+use constant EXIT_NO_FEATURES   => 11;   # taxon chosen, but no PSSM cleared its bit_cutoff
+use constant EXIT_OUT_OF_BOUNDS => 12;   # input length outside -min/-max
+
+#
+# Fail with a fixed code instead of `die`, whose status is whatever $! held.
+#
+sub bail
+{
+	my($code, @msg) = @_;
+	print STDERR @msg;
+	exit($code);
+}
+
 my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta 
 
 		-h   help
@@ -98,6 +132,18 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			16	PSSM
  			17	NT sequence (if -s append sequences)	
  			18	AA sequence (if -s append sequences)
+
+
+ 	## Exit status.  10 and up are the "nothing was annotated" outcomes: all three are
+ 	## legitimate results for a short or divergent fragment rather than errors, and a
+ 	## caller that chains the downstream stages should skip them rather than fail the job.
+
+ 			0	features were called
+ 			1	usage or configuration error (bad flag, unknown taxon, unreadable JSON)
+ 			2	internal error
+ 			10	no reference contig scored above -mcb, so no taxon could be chosen
+ 			11	a taxon was chosen, but no PSSM cleared its bit_cutoff
+ 			12	input length outside -min/-max
 ';
 
 my ($help, $opt_file, $contig_file, $tmp, $tax, $vtax, $list_vtax, $vfam, $list_vfam, $skip_class, $keep_stop, $genome_name, $cdir, $pdir, $keep_temp, $min_len, $max_len, $aa_only, $dna_only, $tbl_only, $no_out, $ctbl, $prefix, $append_seqs, $threads, $min_contig_bit, $min_margin);
@@ -130,8 +176,8 @@ my $opts = GetOptions( 'h'         => \$help,
                        'p=s'       => \$prefix,
                        's'         => \$append_seqs); 
 
-if ($help){die "$usage\n";}
-unless ($contig_file || $list_vtax || $list_vfam){die "must declare an input subject file with -i \n\n$usage\n";}
+if ($help){print "$usage\n"; exit(EXIT_OK);}   # asking for help is not an error
+unless ($contig_file || $list_vtax || $list_vfam){bail(EXIT_USAGE, "must declare an input subject file with -i \n\n$usage\n");}
 
 # Name the Temp file:
 # generates a random 20 digit string of 0-9a-f
@@ -150,8 +196,9 @@ unless ($threads){$threads = 8}
 
 ## This is the json file with all of the protein-specific information for 
 ## Customizing the annotation.
-open (IN, "<$opt_file"), or die "Cant find JSON options file, use -opt\n"; 
-my $options = decode_json(scalar read_file(\*IN));
+open (IN, "<$opt_file") or bail(EXIT_USAGE, "Cant find JSON options file, use -opt\n");
+my $options = eval { decode_json(scalar read_file(\*IN)) };
+bail(EXIT_INTERNAL, "Could not parse JSON options file $opt_file: $@") if $@;
 close IN;
 
 ## Resolve the annotation taxon.  By default it is detected by BLASTn against
@@ -166,13 +213,13 @@ my @valid_vfam   = do { my %s; $s{$_}++ for values %taxon_family; sort keys %s }
 if ($list_vtax)
 {
 	print "$_\n" foreach @valid_vtax;
-	exit(0);
+	exit(EXIT_OK);
 }
 
 if ($list_vfam)
 {
 	print "$_\n" foreach @valid_vfam;
-	exit(0);
+	exit(EXIT_OK);
 }
 
 # -vfam and -vtax are different claims about how much the caller knows, and they cannot
@@ -181,18 +228,20 @@ if ($list_vfam)
 # Checked before the -skip-classification rule below so the more specific message wins.
 if ((defined $vfam) && (defined $vtax))
 {
-	die "-vfam and -vtax cannot be combined: -vtax declares the annotation taxon outright,\n"
-	  . "-vfam asks BLASTn to choose one within a family. Use whichever matches what is known.\n";
+	bail(EXIT_USAGE,
+	    "-vfam and -vtax cannot be combined: -vtax declares the annotation taxon outright,\n"
+	  . "-vfam asks BLASTn to choose one within a family. Use whichever matches what is known.\n");
 }
 if ((defined $vfam) && $skip_class)
 {
-	die "-vfam and -skip-classification cannot be combined: -vfam already restricts the sweep,\n"
-	  . "and the genus still has to be chosen from the reps it leaves.\n";
+	bail(EXIT_USAGE,
+	    "-vfam and -skip-classification cannot be combined: -vfam already restricts the sweep,\n"
+	  . "and the genus still has to be chosen from the reps it leaves.\n");
 }
 
 if ($skip_class && (! defined $vtax))
 {
-	die "-skip-classification only makes sense with -vtax: there is no declared taxon to restrict the sweep to.\n";
+	bail(EXIT_USAGE, "-skip-classification only makes sense with -vtax: there is no declared taxon to restrict the sweep to.\n");
 }
 
 # The margin is winner/runner-up across taxa, so it needs the full sweep.  Under
@@ -200,10 +249,11 @@ if ($skip_class && (! defined $vtax))
 # to divide by; fail loudly rather than silently reporting an infinite margin.
 if (defined $min_margin)
 {
-	die "-margin needs a ratio greater than 1 (got $min_margin); 1 would accept any winner.\n"
+	bail(EXIT_USAGE, "-margin needs a ratio greater than 1 (got $min_margin); 1 would accept any winner.\n")
 		if $min_margin <= 1;
-	die "-margin cannot be combined with -skip-classification: only the declared taxon's\n"
-	  . "reference contigs are searched, so there is no runner-up taxon to compare against.\n"
+	bail(EXIT_USAGE,
+	    "-margin cannot be combined with -skip-classification: only the declared taxon's\n"
+	  . "reference contigs are searched, so there is no runner-up taxon to compare against.\n")
 		if $skip_class;
 }
 
@@ -241,10 +291,11 @@ if (defined $vtax)
 		}
 		else
 		{
-			die "Unknown -vtax value '$vtax'.\n"
+			bail(EXIT_USAGE,
+			    "Unknown -vtax value '$vtax'.\n"
 			  . "Valid annotation taxa (PSSM dirs in $pdir that also have a $opt_file entry):\n"
 			  . join("", map {"\t$_\n"} @valid_vtax)
-			  . "Use -list-vtax to print this list, or -vfam / -list-vfam to declare only a family.\n";
+			  . "Use -list-vtax to print this list, or -vfam / -list-vfam to declare only a family.\n");
 		}
 	}
 }
@@ -267,10 +318,11 @@ if (defined $vfam)
 		}
 		else
 		{
-			die "Unknown -vfam value '$vfam'.\n"
+			bail(EXIT_USAGE,
+			    "Unknown -vfam value '$vfam'.\n"
 			  . "Valid families (the \"family\" field of each taxon in $opt_file):\n"
 			  . join("", map {"\t$_\n"} @valid_vfam)
-			  . "Use -list-vfam to print this list.\n";
+			  . "Use -list-vfam to print this list.\n");
 		}
 	}
 }
@@ -321,7 +373,7 @@ for my $i (0..$#seqs)
 }
 if (($len < $min_len) || ($len > $max_len))
 {
-	die "Unexpected input genome size equal to: $len\nMin = $min_len\tMax = $max_len\n";	
+	bail(EXIT_OUT_OF_BOUNDS, "Unexpected input genome size equal to: $len\nMin = $min_len\tMax = $max_len\n");	
 }	
 
 # Make the temp dir.
@@ -353,7 +405,7 @@ if ($skip_class)
 	@reps = grep { my $t = $_; $t =~ s/\..+//g; $t eq $vtax } @reps;
 	unless (@reps)
 	{
-		die "-skip-classification: no reference contigs for -vtax $vtax in $cdir\n";
+		bail(EXIT_USAGE, "-skip-classification: no reference contigs for -vtax $vtax in $cdir\n");
 	}
 	printf STDERR "Restricting BLASTn sweep to %d of %d reference contigs (-skip-classification, -vtax %s)\n",
 	       scalar @reps, $before, $vtax;
@@ -372,7 +424,7 @@ if (defined $vfam)
 	               defined $taxon_family{$t} && $taxon_family{$t} eq $vfam } @reps;
 	unless (@reps)
 	{
-		die "-vfam: no reference contigs for any taxon of family $vfam in $cdir\n";
+		bail(EXIT_USAGE, "-vfam: no reference contigs for any taxon of family $vfam in $cdir\n");
 	}
 	my %in_scope = map {my $t = $_; $t =~ s/\..+//g; ($t => 1)} @reps;
 	printf STDERR "Restricting BLASTn sweep to %d of %d reference contigs (-vfam %s: %s)\n",
@@ -445,12 +497,12 @@ if ($best_contig_bit < $min_contig_bit)
 		# a -vfam run that fails here would have failed unrestricted too.
 		print STDERR "No reference contig of family $vfam scored above -mcb $min_contig_bit "
 		           . "(best = " . (defined $best_rep ? $best_rep : "none") . ", bit = $best_contig_bit).\n";
-		exit(1);
+		exit(EXIT_NO_REFERENCE);
 	}
 	else
 	{
 		print STDERR "No matching reference contigs with bit score greater than $min_contig_bit\n";
-		exit(1);
+		exit(EXIT_NO_REFERENCE);
 	}
 }
 
@@ -902,6 +954,13 @@ if ($aa_only)
 chdir ($base);
 unless ($keep_temp){system "rm -rf $tmp";}
 
+# The taxon was decided and every PSSM was searched; $count is how many features survived
+# their bit_cutoff.  Zero is a legitimate outcome, not an error -- for a short fragment
+# "nothing to annotate" is the right answer -- but it is a different outcome from a genome
+# with features, and a caller running the downstream stages needs to tell them apart:
+# transcript-editing, splice variants and quality all die on a GTO with no features.
+exit($count ? EXIT_OK : EXIT_NO_FEATURES);
+
 
 
 ##############sub call_non_pssm_features####################
@@ -1326,7 +1385,7 @@ sub valid_vtax_list
 {
 	my ($pdir, $options) = @_;
 
-	opendir (my $dh, $pdir) or die "Cannot open PSSM directory $pdir: $!\n";
+	opendir (my $dh, $pdir) or bail(EXIT_USAGE, "Cannot open PSSM directory $pdir: $!\n");
 	my @dirs = sort grep{/\.pssms$/} readdir($dh);
 	closedir($dh);
 
@@ -1372,9 +1431,10 @@ sub taxon_family_map
 
 	if (@missing)
 	{
-		die "No \"family\" field for these annotation taxa in the JSON options file:\n"
+		bail(EXIT_USAGE,
+		    "No \"family\" field for these annotation taxa in the JSON options file:\n"
 		  . join("", map {"\t$_\n"} @missing)
-		  . "Every taxon needs one; -vfam and -list-vfam are built from them.\n";
+		  . "Every taxon needs one; -vfam and -list-vfam are built from them.\n");
 	}
 	return %map;
 }
