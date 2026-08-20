@@ -335,10 +335,16 @@ no annotation at all, which in the failure-set rerun was the single largest reco
 Details:
 
 - **The lineage comes from the GTO's own `taxonomy` field**, not from any GenBank record it was
-  built from.  Note that `rast-create-genome --from-genbank` does *not* populate `taxonomy` -- it
-  writes only `ncbi_taxonomy_id` and `scientific_name` -- so a GTO built that way has nothing to
-  fall back to and the flag will say so and do nothing.  (`ncbi_lineage`, if present, is read as an
-  alternative.)
+  built from.  `rast-create-genome --from-genbank` does populate it, from the GenBank record's
+  ORGANISM lineage block (`GenBankToGTO.pm`), so the ordinary route into this pipeline has a
+  lineage to read.  (`ncbi_lineage`, if present, is read as an alternative; the GenBank route does
+  not set it.)
+- **The GenBank lineage lists only the ranks *above* the ORGANISM name, so the organism itself is
+  not in `taxonomy`.**  For a strain-level record that costs nothing -- genus and species are still
+  in the lineage.  But for a record whose ORGANISM *is* a bare genus, the genus lands in
+  `scientific_name` and the lineage stops at the family, and the fallback finds nothing even though
+  the GTO plainly names the genus.  `GN354371` is the canonical shape: `scientific_name` is
+  `Orthomarburgvirus`, `taxonomy` ends `...; Mononegavirales; Filoviridae`.
 - The lineage is walked **most specific first**, so an `Orthopneumovirus muris` record lands on the
   species taxon rather than stopping at the genus one rank above it.  Matching is exact-string with
   spaces mapped to underscores; a Bunyavirales lineage finds nothing at species or genus and
