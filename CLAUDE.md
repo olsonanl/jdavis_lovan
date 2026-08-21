@@ -327,6 +327,13 @@ meaningful codes start at 10 rather than 3. The table is in `-h`.
   arrayrefs through `IPC::Run`, not strings through a shell, so arguments need no quoting and a
   signal is not masked as the shell's 128+n. Measured cost over the ~410 searches of a flu genome:
   none. The two downstream stages check theirs too (previously warn-only, or discarded outright).
+- **No pipeline script shells out at all** as of `c07a60c`, which finished what `1d5deb5` started
+  (`UPSTREAM-ISSUES.md` #23): `cp` → `File::Copy::copy`, `rm -rf $tmp` → `File::Path::remove_tree`,
+  `` `hostname` `` → `Sys::Hostname`. The copies are checked and fatal (an unreadable source
+  directory would otherwise surface as a confusing BLAST failure a few lines later); cleanup only
+  warns, since the annotation is already written. What is *not* fixed, because it is a BLAST+
+  limitation rather than a quoting one, is an input filename containing a space — `makeblastdb`
+  reads `-in` as a list and then demands `-out`. A space in `LOWVAN_DATA_DIR` is fine.
 
 The GTO wrapper **still exits 0 by default** and always writes the GTO; `--propagate-exit-status`
 makes it return the base script's code. Off by default because `p3x-annotate-lowvan.pl` runs all

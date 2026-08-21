@@ -438,6 +438,9 @@ whatever `$!` happened to hold.  It now exits with a code that says which happen
 failure reports the program's own error along with the command that produced it.  This is what makes
 11 worth acting on: before the check, a BLAST that exited non-zero after writing a valid but empty
 report simply produced a genome with no features, which is indistinguishable from an honest 11.
+No external program is run through a shell any more, so paths need no quoting: a `LOWVAN_DATA_DIR`
+containing a space works.  (An *input contig filename* containing a space still does not — that one
+is `makeblastdb`, which reads `-in` as a space-separated list, and it now says so at rc=2.)
 
 **10, 11 and 12 are not errors.** For a 200 bp fragment "nothing to annotate" is the right answer.
 What they mean for a caller is that there is nothing for the downstream stages to work on:
