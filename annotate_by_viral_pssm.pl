@@ -5,6 +5,8 @@ use JSON::XS;
 use File::Slurp;
 use Getopt::Long;
 use IPC::Run qw(run);
+use File::Copy qw(copy);
+use File::Path qw(remove_tree);
 use Cwd;
 use gjoseqlib;
 
@@ -433,9 +435,12 @@ if (($len < $min_len) || ($len > $max_len))
 # Make the temp dir.
 my $base = getcwd;
 mkdir ($tmp); 
-system "cp $contig_file $tmp";
 my $s_file = $contig_file;
 $s_file =~ s/.+\///g; 
+# copy() rather than `cp`: no shell, and a failure is reported here instead of as a confusing
+# makeblastdb error on a file that was never written.
+copy($contig_file, "$tmp/$s_file")
+	or bail(EXIT_INTERNAL, "Could not copy $contig_file into the temp dir $tmp: $!\n");
 
 chdir ($tmp);
 my $mbdb_err = "";
@@ -1012,7 +1017,13 @@ if ($aa_only)
 
 
 chdir ($base);
-unless ($keep_temp){system "rm -rf $tmp";}
+# remove_tree rather than `rm -rf`: no shell, and $tmp is never handed to one as a string.
+# Cleanup failing is worth a warning but not the run -- the annotation is already written.
+unless ($keep_temp)
+{
+	remove_tree($tmp, { error => \my $rm_errors });
+	warn "Could not fully remove temp dir $tmp\n" if $rm_errors && @$rm_errors;
+}
 
 # The taxon was decided and every PSSM was searched; $count is how many features survived
 # their bit_cutoff.  Zero is a legitimate outcome, not an error -- for a short fragment

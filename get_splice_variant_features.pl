@@ -6,6 +6,7 @@ use File::Temp;
 use JSON::XS;
 use File::Slurp;
 use IPC::Run qw(run);
+use File::Copy qw(copy);
 use Cwd;
 use gjoseqlib;
 use Getopt::Long::Descriptive;
@@ -151,7 +152,10 @@ if (scalar @to_analyze)
 		
 		print STDERR "Analyzing $name\n"; 
 		my $query = "$dir/$fam/$name.fasta"; 
-		run ("cp $query ."); 
+		# copy() rather than a shelled-out cp.  This one the loop genuinely needs: it
+		# makeblastdb's and re-reads the local $name.fasta below.
+		copy($query, "$name.fasta")
+			or die "get_splice_variant_features:  could not copy $query into the temp dir: $!\n";
 
 		my $make_db2_err = "";
 		my $make_db2 = run(["makeblastdb", "-dbtype", "nucl", "-in", "$name.fasta"], ">", "/dev/null", "2>", \$make_db2_err);

@@ -7,6 +7,7 @@ use File::Temp;
 use Getopt::Long::Descriptive;
 use File::Copy;
 use IPC::Run qw(run);
+use Sys::Hostname;
 use Cwd;
 
 # Try to load version module; fall back to "dev" if not available
@@ -106,7 +107,9 @@ if ($opt->fallback_viral_taxon && $opt->viral_taxon)
       . "and under --viral-taxon a low -mcb is a warning rather than a failure, so nothing would trigger.\n";
 }
 
-chomp(my $hostname = `hostname`);
+# Sys::Hostname rather than a `hostname` backtick: no shell, no subprocess, and it falls back
+# through several sources rather than depending on the binary being on PATH.
+my $hostname = hostname();
 
 my $tempdir = File::Temp->newdir(CLEANUP => ($opt->debug ? 0 : 1));
 my $prefix = $opt->prefix // "Viral_Anno";

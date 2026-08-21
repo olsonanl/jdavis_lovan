@@ -6,6 +6,7 @@ use File::Temp;
 use JSON::XS;
 use File::Slurp;
 use IPC::Run qw(run);
+use File::Copy qw(copy);
 use Cwd;
 use gjoseqlib;
 use Getopt::Long::Descriptive;
@@ -146,7 +147,11 @@ if (scalar @to_analyze)
 		print STDERR "\tAnalyzing $name\n\n"; 
 		my $query = "$dir/$fam/$name.fasta"; 
 
-		run ("cp $query ."); 
+		# copy() rather than a shelled-out cp.  A failure here means the curated query
+		# directory is unreadable, which the blastn below would hit anyway a step later
+		# and less clearly, so it is worth stopping on.
+		copy($query, "$name.fasta")
+			or die "get_transcript_edited_features:  could not copy $query into the temp dir: $!\n";
 		
 
 		my @blast_parms = (
