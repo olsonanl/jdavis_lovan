@@ -259,10 +259,10 @@ Implementation notes:
 - `-mcb` is deliberately reused as the floor rather than adding a second knob, and the below-floor
   path exits 1 exactly as the undeclared path does. `-vtax`'s "downgrade the rejection to a warning"
   exception does **not** extend to `-vfam`.
-- The `<prefix>.classification` sidecar is written under `-vfam` as well as `-margin`, with three
-  extra lines (`scope family`, `family <name>`, `min_contig_bit <n>`). This is what lets the GTO
-  wrapper recover the chosen genus when the annotation comes back empty: `viral_family` falls back
-  to the sidecar's `annotated_as`, so guard 2 passes and the downstream stages run.
+- The `<prefix>.classification` sidecar carries three extra lines under `-vfam` (`scope family`,
+  `family <name>`, `min_contig_bit <n>`). Recovering the chosen genus from it when the annotation
+  comes back empty was originally a `-vfam` affordance; since `054ba6f` the sidecar is written on
+  every run, so that recovery applies to plain BLASTn too. See "The classification sidecar" below.
 - The within-family margin is printed whether or not `-margin` is given, and is more meaningful than
   the unrestricted one — the runner-up is a sibling genus, not an unrelated family.
 - The GTO wrapper gained `--min-contig-bit` (passed through as `-mcb`) at the same time; it had
@@ -376,15 +376,52 @@ job — see the evidence above and `failure-analysis/margin-scoring.md`.
   worth more than another dead job.
 - The runner-up is free: `%taxon_best` already holds each taxon's best score from the sweep. That
   is also why `-margin` is refused with `-skip-classification` — one taxon searched, no runner-up.
-- `<prefix>.classification` is the sidecar: tab-separated key/value lines
-  (`taxon`, `reference`, `bit`, `runner_up`, `runner_up_bit`, `margin`, `margin_threshold`,
-  `below_threshold`, `annotated_as`) followed by repeated `score\t<taxon>\t<bit>\t<file>` ranking
-  lines. `margin` is the literal string `inf` when nothing else scored above zero.
+- The margin is **computed and recorded on every run** as of `054ba6f` (see "The classification
+  sidecar" below); `-margin` adds only the stderr warning, the `margin_threshold` /
+  `below_threshold` lines, and the merge onto `close_genomes`.
+
+## The classification sidecar (`<prefix>.classification`)
+
+Written on **every run that reaches the annotation step** as of `054ba6f` — not just under `-margin`
+/ `-vfam`, as before. It exists because the feature table is otherwise the only record of the
+classification, and an empty feature table is a real outcome: exit 11 means a taxon *was* chosen and
+then nothing cleared `bit_cutoff`. Before this, those genomes reached the GTO with `viral_family`
+null, `close_genomes` empty and no `viral_taxon` on the analysis event — indistinguishable from a
+genome that was never classified. 620 of 5,000 in the 2026-08-27 production rerun.
+
+Tab-separated key/value lines, then repeated `score\t<taxon>\t<bit>\t<file>` ranking lines:
+
+| key | |
+|---|---|
+| `taxon` / `reference` / `bit` | what BLASTn picked overall, before `-vtax` overrides it |
+| `runner_up` / `runner_up_bit` | `-` / `0` when nothing else scored |
+| `margin` | the literal string `inf` when nothing else scored above zero |
+| `margin_threshold`, `below_threshold` | `-margin` only |
+| `scope`, `family`, `min_contig_bit` | `-vfam` only |
+| `annotated_as` | the taxon actually used (`= -vtax` when declared) |
+| `anno_reference`, `anno_bit`, `genome_ids`, `genome_name` | feature-table columns 12–15 |
+
+The four `anno_*` / `genome_*` keys are what let the wrapper rebuild a `close_genomes` record with no
+feature table. They are **separate keys from `reference` / `bit` on purpose**: under `-vtax` those
+are the overall BLASTn winner, while columns 12–13 are the best rep *within the annotation taxon*.
+
+- **Not written on the `-mcb` rejection path**, which exits earlier. `annotated_as` is what the
+  wrapper turns into `viral_family`, and recording a taxon for a genome whose classification was
+  *refused* would hand the downstream stages a taxon this run declined to annotate with. An exit 10
+  genuinely has no taxon; keep it that way.
 - The inner script has `chdir`ed into the temp dir by the time it writes the sidecar, so the path is
-  rooted at `$base` (the original cwd) unless `-p` is absolute. The GTO wrapper reads it from `$here`
-  and merges `margin` / `runner_up` / `runner_up_value` / `margin_below_threshold` onto the
-  `close_genomes` record; with the flag off there is no file and the record keeps its original six
-  keys. `read_classification` must stay silent when the file is absent — that is the normal case.
+  rooted at `$base` (the original cwd) unless `-p` is absolute. The GTO wrapper reads it from `$here`.
+- In the wrapper **the feature table still wins**; the sidecar only fills in what an empty table left
+  undef. A run that called features is byte-identical to before.
+- The margin merge onto `close_genomes` is gated on `--margin` / `--viral-family`, **not** on the
+  sidecar existing — that used to be the same condition and no longer is. Without the gate every GTO
+  the pipeline produces would silently gain `margin` / `runner_up` / `runner_up_value`.
+- `read_classification` must stay silent when the file is absent. That is now the *unusual* case
+  (rejected classification, out-of-bounds input, or a deployed base script predating `054ba6f`), but
+  all three must still return undef without warning.
+- The close-genome record is suppressed on an **empty** `genome_ids`, not only an undefined one.
+  That also changes exit-0 behaviour for the one reference file of 87 whose `Viral_PSSM.json` entry
+  has no `genome_ids` — `Arenaviridae.6.dna`, which used to produce a record of empty strings.
 
 ## Failure analysis
 

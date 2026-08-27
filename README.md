@@ -285,7 +285,7 @@ that failed classification and have no genus, in a way that a bare `-mcb 50` is 
 
 `-margin` is also more informative here, because the runner-up is a sibling genus rather than an
 unrelated family.  With `-vfam` the within-family margin is printed whether or not you pass
-`-margin`, and the `<prefix>.classification` sidecar is written either way, with three extra lines:
+`-margin`, and the `<prefix>.classification` sidecar carries three extra lines:
 
 ```
 scope           family
@@ -396,8 +396,16 @@ Notes on the behaviour:
 - **It is refused with `-skip-classification`**, which searches one taxon's references and so has
   no runner-up to compare against, and with any value `<= 1`, which would accept anything.
 
-Whether or not it warns, `-margin` writes a `<prefix>.classification` sidecar next to the other
-outputs -- tab-separated `key<TAB>value` lines, then the full per-taxon ranking:
+The margin is recorded for every genome either way, in the classification sidecar below.  What
+`-margin` adds is the warning, the threshold and the verdict, and the merge onto `close_genomes` --
+`margin`, `runner_up`, `runner_up_value` and `margin_below_threshold` -- so that the confidence of
+the call travels with the genome.  Without the flag the sidecar still has the numbers; they just do
+not go into the GTO.
+
+## The classification sidecar
+
+Every run that gets as far as annotating writes `<prefix>.classification` next to the other outputs:
+tab-separated `key<TAB>value` lines, then the full per-taxon ranking.
 
 ```
 taxon           Jeilongvirus
@@ -406,17 +414,33 @@ bit             217.285
 runner_up       Morbillivirus
 runner_up_bit   183.165
 margin          1.19
-margin_threshold 1.3
-below_threshold 1
+margin_threshold 1.3          <- -margin only
+below_threshold 1             <- -margin only
 annotated_as    Jeilongvirus
+anno_reference  Jeilongvirus.2.dna
+anno_bit        217.285
+genome_ids      1497434.118
+genome_name     Rodent paramyxovirus RtAp-ParaV/NX2015
 score   Jeilongvirus    217.285 Jeilongvirus.2.dna
 score   Morbillivirus   183.165 Morbillivirus.2.dna
 ...
 ```
 
-`margin` is the literal string `inf` when no other taxon scored above zero.  The GTO wrapper reads
-the sidecar and adds `margin`, `runner_up`, `runner_up_value` and `margin_below_threshold` to the
-`close_genomes` record, so the confidence of the call travels with the genome.
+`margin` is the literal string `inf` when no other taxon scored above zero.  `taxon`/`reference`/
+`bit` are what BLASTn picked across every reference; `annotated_as` and the `anno_*`/`genome_*` keys
+are the taxon actually used and its best reference, which differ from the first three under `-vtax`.
+
+The reason it is unconditional is exit 11.  That code means a taxon *was* chosen and then no PSSM
+cleared its `bit_cutoff`, so the classification exists but the feature table -- the only other place
+it is written down -- is empty.  Before this the GTO wrapper had nothing to read, and those genomes
+came out with `viral_family` null and `close_genomes` empty, indistinguishable from a genome that
+was never classified at all; 620 of the 5,000 genomes of the August 2026 production rerun.  The
+wrapper now falls back to the sidecar, and only there: when the feature table has the values, it
+wins, so a run that called features is unchanged.
+
+It is deliberately **not** written when the classification was rejected (exit 10).  `annotated_as`
+is what becomes the genome's `viral_family`, and naming a taxon for a genome that was refused would
+tell the downstream stages to process it as something this run declined to annotate it as.
 
 ## Exit status, and what the run records about itself
 
