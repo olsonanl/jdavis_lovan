@@ -141,14 +141,17 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
 
 		-margin Minimum ratio between the bit score of the winning taxon and that of
 		     the runner-up taxon (e.g. -margin 1.3).  OFF by default: without it
-		     nothing is computed, warned about, or written.  When given, the
-		     classification is scored for confidence as well as absolute strength --
-		     a genome that clears -mcb but beats the runner-up by only a few bits is
-		     a near-tie, and a near-tie in the wrong direction is a mis-annotation
-		     rather than a failed job.  The genome is still annotated: this warns on
-		     STDERR and writes the numbers to <prefix>.classification, it does not
-		     reject.  Not available with -skip-classification, which searches the
-		     reps of one taxon only and so has no runner-up to compare against.
+		     nothing is warned about.  When given, the classification is scored for
+		     confidence as well as absolute strength -- a genome that clears -mcb but
+		     beats the runner-up by only a few bits is a near-tie, and a near-tie in
+		     the wrong direction is a mis-annotation rather than a failed job.  The
+		     genome is still annotated: this warns on STDERR and adds the threshold
+		     and the verdict to <prefix>.classification, it does not reject.  Not
+		     available with -skip-classification, which searches the reps of one
+		     taxon only and so has no runner-up to compare against.
+
+		     The margin itself is recorded for every genome whether or not -margin is
+		     given: see <prefix>.classification below.
 
         -j   Full path to the options file in JSON format which carries data for a match (D = $default_data_dir/Viral_PSSM.json)
 		-c   Representative contigs directory (D = $default_data_dir/Viral-Rep-Contigs)
@@ -188,6 +191,26 @@ my $usage = 'annotate_by_viral_pssm.pl [options] -i subject_contig(s).fasta
  			17	NT sequence (if -s append sequences)	
  			18	AA sequence (if -s append sequences)
 
+
+ 	## <prefix>.classification -- the classification sidecar, written on every run that
+ 	## reaches the annotation step, including one that goes on to call no features.  It
+ 	## is the only record of which taxon was chosen when the feature table comes out
+ 	## empty (exit 11).  Tab-separated key/value lines:
+
+ 			taxon           the taxon BLASTn picked, before -vtax overrides it
+ 			reference       its best reference .dna file, "-" if none scored
+ 			bit             that reference bit score
+ 			runner_up       the second-best taxon, "-" if nothing else scored
+ 			runner_up_bit   its best bit score, 0 if there is no runner-up
+ 			margin          bit / runner_up_bit, or "inf" when uncontested
+ 			margin_threshold, below_threshold   -margin only
+ 			scope, family, min_contig_bit       -vfam only
+ 			annotated_as    the taxon actually used (= -vtax when declared)
+ 			anno_reference  closest rep within annotated_as -- table column 12
+ 			anno_bit        its bit score                   -- table column 13
+ 			genome_ids      -- table column 14, empty if the JSON has no entry
+ 			genome_name     -- table column 15
+ 			score <taxon> <bit> <file>          repeated: full per-taxon ranking
 
  	## Exit status.  10 and up are the "nothing was annotated" outcomes: all three are
  	## legitimate results for a short or divergent fragment rather than errors, and a
@@ -593,30 +616,32 @@ if ((! $skip_class) && (defined $vtax) && (defined $best_virus_match) && ($best_
 # set a wrong-but-flagged annotation is more useful than another dead job.
 
 #
-# The sidecar is also written under -vfam, with no -margin.  A family-restricted call is
-# a decision the caller asked us to make on partial information, usually in the band where
-# -mcb was relaxed, so the losing siblings and their scores are the evidence for it and
-# have to survive the run.  It is also what lets the GTO wrapper recover the chosen genus
-# when the annotation comes back empty -- there is no feature table to read it off.
+# The margin itself is computed on every run: %taxon_best is already in hand, so the
+# runner-up is free, and the sidecar below records it for every genome.  Only the stderr
+# reporting is gated -- an invocation that did not ask for margin scoring must not have
+# its stderr change shape, because pipeline_run*.sh and the GTO wrapper both parse it.
 #
 my ($margin, $runner_up, $runner_up_bit);
+
+# rank taxa by their best bit score; the winner is $best_virus_match by construction
+my @ranked = sort {$taxon_best{$b}->[0] <=> $taxon_best{$a}->[0]} keys %taxon_best;
+if (@ranked >= 2)
+{
+	$runner_up     = $ranked[1];
+	$runner_up_bit = $taxon_best{$runner_up}->[0];
+}
+
+# No runner-up, or a runner-up that scored zero, means nothing else was in
+# contention.  That is maximum confidence, not a division by zero.
+$margin = (defined $runner_up_bit && $runner_up_bit > 0)
+        ? $best_contig_bit / $runner_up_bit
+        : undef;
+
+my $margin_shown = defined $margin ? sprintf("%.2f", $margin) : "inf";
+
 if ((defined $min_margin) || (defined $vfam))
 {
-	# rank taxa by their best bit score; the winner is $best_virus_match by construction
-	my @ranked = sort {$taxon_best{$b}->[0] <=> $taxon_best{$a}->[0]} keys %taxon_best;
-	if (@ranked >= 2)
-	{
-		$runner_up     = $ranked[1];
-		$runner_up_bit = $taxon_best{$runner_up}->[0];
-	}
-
-	# No runner-up, or a runner-up that scored zero, means nothing else was in
-	# contention.  That is maximum confidence, not a division by zero.
-	$margin = (defined $runner_up_bit && $runner_up_bit > 0)
-	        ? $best_contig_bit / $runner_up_bit
-	        : undef;
-
-	my $shown = defined $margin ? sprintf("%.2f", $margin) : "inf";
+	my $shown = $margin_shown;
 	if (! defined $min_margin)
 	{
 		# -vfam without -margin: report, do not judge.  Within a family the runner-up
@@ -640,49 +665,6 @@ if ((defined $min_margin) || (defined $vfam))
 		           . (defined $runner_up ? " (runner-up $runner_up, bit = $runner_up_bit)" : " (no runner-up taxon)")
 		           . "\n";
 	}
-
-	# Sidecar, so the numbers survive the run.  Written whenever -margin is given,
-	# not only on a warning -- a margin is evidence either way, and the GTO wrapper
-	# reads this file to attach it to close_genomes.
-	#
-	# $base, not the cwd: we are inside the temp dir at this point (chdir above), and
-	# the wrapper deletes it.  This is where the .tbl/.ffn/.faa outputs land too --
-	# they are written after the chdir back, so an absolute -p must not be re-rooted.
-	my $cls_file = ($prefix =~ m,^/,) ? "$prefix.classification" : "$base/$prefix.classification";
-	if (open(my $cls, ">", $cls_file))
-	{
-		print $cls "taxon\t$best_virus_match\n";
-		print $cls "reference\t" . (defined $best_rep ? $best_rep : "-") . "\n";
-		print $cls "bit\t$best_contig_bit\n";
-		print $cls "runner_up\t" . (defined $runner_up ? $runner_up : "-") . "\n";
-		print $cls "runner_up_bit\t" . (defined $runner_up_bit ? $runner_up_bit : 0) . "\n";
-		print $cls "margin\t$shown\n";
-		if (defined $min_margin)
-		{
-			print $cls "margin_threshold\t$min_margin\n";
-			print $cls "below_threshold\t" . ((defined $margin && $margin < $min_margin) ? 1 : 0) . "\n";
-		}
-		# Scope of the sweep the numbers above came out of.  Without this a -vfam
-		# ranking reads like a full one that happened to find only sibling genera.
-		if (defined $vfam)
-		{
-			print $cls "scope\tfamily\n";
-			print $cls "family\t$vfam\n";
-			print $cls "min_contig_bit\t$min_contig_bit\n";
-		}
-		print $cls "annotated_as\t$virus\n";
-		# full ranking, so a near-tie can be inspected without rerunning the sweep
-		for my $t (@ranked)
-		{
-			last if $taxon_best{$t}->[0] <= 0;
-			print $cls "score\t$t\t$taxon_best{$t}->[0]\t$taxon_best{$t}->[1]\n";
-		}
-		close $cls;
-	}
-	else
-	{
-		print STDERR "WARNING: could not write $cls_file: $!\n";
-	}
 }
 
 #get closest genome data, for the taxon we are annotating with
@@ -691,6 +673,72 @@ if (defined $anno_rep)
 {
 	$best_rep_ids  = $options->{$virus}->{close_genomes}->{$anno_rep}->{genome_ids};
 	$best_rep_name = $options->{$virus}->{close_genomes}->{$anno_rep}->{genome_name};
+}
+
+# The classification sidecar, written on every run that gets this far.
+#
+# It exists because the feature table is the only other place the classification is
+# recorded, and an empty feature table is a real outcome: rc 11 means a taxon *was*
+# chosen and then no PSSM cleared its cutoff.  Before this was unconditional, those
+# genomes reached the GTO with viral_family null and close_genomes empty, as if no
+# classification had happened at all -- 620 of 5,000 in the production rerun of
+# 2026-08-27.  anno_reference/anno_bit/genome_ids/genome_name are exactly feature-table
+# columns 13-16, so the wrapper can rebuild the close_genomes record from this file when
+# there is no row to read them off.
+#
+# Deliberately not written on the -mcb rejection path above: that exits before here, and
+# annotated_as is what the wrapper turns into viral_family.  Recording a taxon for a
+# genome whose classification was refused would hand the downstream stages a taxon this
+# run explicitly declined to annotate with.
+#
+# $base, not the cwd: we are inside the temp dir at this point (chdir above), and
+# the wrapper deletes it.  This is where the .tbl/.ffn/.faa outputs land too --
+# they are written after the chdir back, so an absolute -p must not be re-rooted.
+my $cls_file = ($prefix =~ m,^/,) ? "$prefix.classification" : "$base/$prefix.classification";
+if (open(my $cls, ">", $cls_file))
+{
+	print $cls "taxon\t$best_virus_match\n";
+	print $cls "reference\t" . (defined $best_rep ? $best_rep : "-") . "\n";
+	print $cls "bit\t$best_contig_bit\n";
+	print $cls "runner_up\t" . (defined $runner_up ? $runner_up : "-") . "\n";
+	print $cls "runner_up_bit\t" . (defined $runner_up_bit ? $runner_up_bit : 0) . "\n";
+	print $cls "margin\t$margin_shown\n";
+	if (defined $min_margin)
+	{
+		print $cls "margin_threshold\t$min_margin\n";
+		print $cls "below_threshold\t" . ((defined $margin && $margin < $min_margin) ? 1 : 0) . "\n";
+	}
+	# Scope of the sweep the numbers above came out of.  Without this a -vfam
+	# ranking reads like a full one that happened to find only sibling genera.
+	if (defined $vfam)
+	{
+		print $cls "scope\tfamily\n";
+		print $cls "family\t$vfam\n";
+		print $cls "min_contig_bit\t$min_contig_bit\n";
+	}
+	print $cls "annotated_as\t$virus\n";
+
+	# The closest reference *within the annotation taxon*, which under -vtax is not the
+	# same reference as "reference"/"bit" above -- those are the overall BLASTn winner.
+	# Kept as separate keys for that reason.  genome_ids/genome_name are empty when the
+	# .dna file has no close_genomes entry in the JSON (the Arenaviridae.6.dna defect);
+	# the wrapper treats empty as "no record", same as it does for an empty table column.
+	print $cls "anno_reference\t" . (defined $anno_rep ? $anno_rep : "-") . "\n";
+	print $cls "anno_bit\t$anno_bit\n";
+	print $cls "genome_ids\t" . (defined $best_rep_ids ? $best_rep_ids : "") . "\n";
+	print $cls "genome_name\t" . (defined $best_rep_name ? $best_rep_name : "") . "\n";
+
+	# full ranking, so a near-tie can be inspected without rerunning the sweep
+	for my $t (@ranked)
+	{
+		last if $taxon_best{$t}->[0] <= 0;
+		print $cls "score\t$t\t$taxon_best{$t}->[0]\t$taxon_best{$t}->[1]\n";
+	}
+	close $cls;
+}
+else
+{
+	print STDERR "WARNING: could not write $cls_file: $!\n";
 }
 
 my $how = defined $vtax ? ($skip_class ? "\t(taxon declared with -vtax, sweep restricted)"

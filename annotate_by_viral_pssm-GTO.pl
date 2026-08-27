@@ -366,14 +366,38 @@ if (open(my $tbl, "<", "$here/$prefix.stdout.txt"))
 	# there is no close genome record to hang it on.
 	my $cls = read_classification("$here/$prefix.classification");
 
-	if (defined $close_id)
+	# An empty feature table does not mean there was no classification.  Exit 11 is
+	# "a taxon was chosen and then nothing cleared its bit_cutoff", so the taxon, the
+	# closest reference and its bit score all exist -- there is just no row to read them
+	# off.  Take them from the sidecar instead, which the base script writes on every run
+	# that gets as far as annotating.  Without this the 620 such genomes of the 5,000
+	# production rerun reached the GTO indistinguishable from ones never classified at all.
+	#
+	# The table wins when it has them, so a run that called features is untouched.
+	if ($cls && !defined $close_id)
+	{
+		$close_file = $cls->{anno_reference}
+			if defined $cls->{anno_reference} && $cls->{anno_reference} ne "-";
+		$close_bit  = $cls->{anno_bit};
+		$close_id   = $cls->{genome_ids};
+		$close_name = $cls->{genome_name};
+	}
+
+	# Empty, not just undef: a .dna file with no close_genomes entry in the JSON yields an
+	# empty column 14 and an empty sidecar genome_ids alike.  Either way there is no close
+	# genome to record, and a record of empty strings is worse than none.
+	if (defined $close_id && $close_id ne "")
 	{
 		my $close = { genome_id => $close_id, genome_name => $close_name, file_name => $close_file, closeness_measure => "BLASTn bit score", closeness_value => $close_bit, analysis_method => "LowVan Annotate"};
 
 		# --margin: carry the confidence of the classification, not just its strength.
-		# The base script wrote these to $prefix.classification; absent that file the
-		# flag was not used and the record keeps its original shape.
-		if ($cls)
+		#
+		# Gated on the flags rather than on the presence of the sidecar, which the base
+		# script now writes for every genome: the margin is recorded there either way, but
+		# putting it on close_genomes unasked would change the shape of every GTO the
+		# pipeline has ever produced.  These two flags are exactly the old condition for
+		# the file existing at all, so a run that does not use them is unaffected.
+		if ($cls && ($opt->margin || $opt->viral_family))
 		{
 			$close->{margin}          = $cls->{margin}        if defined $cls->{margin};
 			$close->{runner_up}       = $cls->{runner_up}     if defined $cls->{runner_up};
@@ -466,10 +490,12 @@ $genome_in->destroy_to_file($opt->output);
 exit($opt->propagate_exit_status ? $rc : 0);
 
 #
-# Read the <prefix>.classification sidecar written by annotate_by_viral_pssm.pl -margin.
-# Returns undef when the file is absent, i.e. when --margin was not used -- that is the
-# normal case and must not warn.  Format is one tab-separated key/value per line, plus
-# repeated "score" lines holding the full per-taxon ranking, which we do not need here.
+# Read the <prefix>.classification sidecar written by annotate_by_viral_pssm.pl.  Written
+# on every run that reaches the annotation step, so the file is normally present; it is
+# absent when the classification was rejected (-mcb), when the input was out of bounds, and
+# when the base script is an older deployed one that only wrote it under -margin/-vfam.
+# All three must return undef silently.  Format is one tab-separated key/value per line,
+# plus repeated "score" lines holding the full per-taxon ranking, which we do not need here.
 #
 sub read_classification
 {
