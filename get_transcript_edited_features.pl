@@ -87,7 +87,11 @@ my $json      = decode_json(read_file($opt->json));
 $genome_in or die "Error reading json protein feature data";
 
 my @to_analyze;
-foreach (keys %{$json->{$fam}->{features}})
+
+# sorted: this sets the order the features are searched for, and so the order they are added
+# to the GTO and numbered by new_feature_id.  Perl randomizes hash order per process, so
+# without the sort two runs over the same input give the same features different ids.
+foreach (sort keys %{$json->{$fam}->{features}})
 {
 	my $prot = $_;
 	if ($json->{$fam}->{features}->{$prot}->{special} eq "transcript_edit")
@@ -210,10 +214,13 @@ if (scalar @to_analyze)
 		#Gather in the best match.
 		my $matches = best_blastn_match_by_loc($results);  #removed id, cov, and gap thresholds from here  
 		
-		foreach (keys %$matches)
+		# sorted as well: one feature can match on several contigs, and at several places on
+		# one contig, and each match becomes its own GTO feature.  Contig by name, then
+		# position numerically.
+		foreach (sort keys %$matches)
 		{
 			my $sid = $_;
-			foreach (keys %{$matches->{$sid}})
+			foreach (sort {$a <=> $b} keys %{$matches->{$sid}})
 			{
 				my $from    = $_; 
 				my $to      = $matches->{$sid}->{$from}->{TO};
@@ -311,7 +318,9 @@ if (scalar @to_analyze)
 	# Push features into the GTO
 	if (%features)
 	{
-		foreach (keys %features)
+		# sorted, for the same reason: the feature types are added in this order, so hash
+		# order here decides whether the CDSs or the mat_peptides get the lower ids.
+		foreach (sort keys %features)
 		{
 			my $type = $_; 
 					
@@ -445,10 +454,16 @@ sub best_blastn_match_by_loc
 					# enough (proximity < this HSP's alignment length) to be treated as
 					# the SAME location.  Keyed on proximity, NOT on "is the contig seen",
 					# so a genuinely separate location on an already-seen contig is kept.
+					# Sorted, and this one is not only about ordering: the loop stops at
+					# the first near location, so if two recorded locations are both
+					# within $ali_len of this HSP, hash order chose which one this HSP
+					# was compared against -- and with it whether the HSP replaced a
+					# match or was discarded.  Ascending position makes that the
+					# leftmost, which is at least a rule.
 					my $near_loc;
 					if (exists $matches->{$sid})
 					{
-						foreach my $loc (keys %{$matches->{$sid}})
+						foreach my $loc (sort {$a <=> $b} keys %{$matches->{$sid}})
 						{
 							if (abs($hit_from - $loc) < $ali_len)
 							{
